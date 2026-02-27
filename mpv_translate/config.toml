@@ -1,0 +1,207 @@
+
+[model]
+# Whisper model to use — large-v3 gives the best translation quality
+model = "large-v3"
+
+# Initialization args for faster-whisper
+# Use device = "cuda" for GPU acceleration (requires CUDA-enabled PyTorch)
+args = { device = "cuda", compute_type = "float16" }
+#args = { device = "cpu" }
+
+# Args passed to each transcribe/translate call
+# no_speech_threshold: lower = suppress more silence-only segments (default 0.6)
+task_args = { beam_size = 3, vad_filter = true, word_timestamps = true, no_speech_threshold = 0.35 }
+
+
+[translate]
+# Source language — set to your video's language to skip auto-detection
+# Leave empty ("") or remove to auto-detect
+#
+# Supported Whisper language codes:
+#   ja = Japanese      zh = Chinese       ko = Korean        vi = Vietnamese
+#   th = Thai          id = Indonesian    ms = Malay         tl = Tagalog
+#   de = German        fr = French        es = Spanish       it = Italian
+#   pt = Portuguese    nl = Dutch         pl = Polish        ru = Russian
+#   uk = Ukrainian     cs = Czech         ro = Romanian      hu = Hungarian
+#   el = Greek         tr = Turkish       ar = Arabic        fa = Persian
+#   he = Hebrew        hi = Hindi         bn = Bengali       ta = Tamil
+#   sv = Swedish       da = Danish        no = Norwegian     fi = Finnish
+language = "ja"
+
+# How many seconds to look back from the seek position to find the sentence start.
+# Increase if Whisper often misses the first word after a seek.
+lookback_seconds = 3.0
+
+# Max audio duration per processing chunk (seconds).
+# Longer = more context but slower response.
+chunk_duration = 30.0
+
+# Show original language text above the English translation in the subtitle.
+# Set to false to show only the English translation.
+show_original = false
+
+# Show the English translation in the subtitle.
+# Set to false (with show_original = true) to display only the original language text.
+show_translation = true
+
+# Minimum confidence to accept auto-detected language (0.0–1.0).
+confidence_threshold = 0.95
+
+# Adaptive chunk sizing: the adaptive algorithm will never shrink chunks below this (seconds).
+# Lower = snappier first subtitle after seek; too low = too little context for Whisper.
+min_chunk_duration = 3.0
+
+# Adaptive chunk sizing: how many recent segment durations to keep for the running average.
+adaptive_history = 5
+
+# Adaptive chunk sizing: target this many sentences per chunk.
+# Chunk size = avg_sentence_duration × this value, clamped to [min_chunk_duration, chunk_duration].
+adaptive_target_sentences = 2.0
+
+# Audio duration for the FIRST chunk after a seek (seconds).
+# Must be >= lookback_seconds so the chunk covers the seek point.
+# Smaller = faster first subtitle after seeking, with less context for Whisper.
+seek_chunk_duration = 9.0
+
+# After seeking, MPV pauses and waits up to this many seconds for the first subtitle
+# to appear before resuming playback automatically.
+# Increase if subtitles often arrive after the dialogue has already passed.
+max_wait = 6.0
+
+# Subtitle gap fill: when the silence between two consecutive segments is shorter than this,
+# extend the first segment's end to the next segment's start (seconds).
+# Prevents brief subtitle flicker at natural Whisper boundaries.
+gap_fill_threshold = 0.0
+
+# How long the last subtitle of a chunk stays on screen while the next chunk is being processed (seconds).
+# Too short = subtitle disappears between chunks; too long = stale text lingers.
+last_segment_hold = 0.0
+
+# Seconds to keep each subtitle visible after the last spoken word (requires word_timestamps = true).
+# Prevents subtitles vanishing the instant speech ends; adjust to taste.
+word_end_padding = 1.0
+
+# Filter out common Whisper hallucination phrases ("Thanks for watching!", etc.).
+# Set to false only if you're seeing real speech being incorrectly suppressed.
+suppress_hallucinations = true
+
+# Word-detection pre-filter: a small Whisper model checks if actual words are spoken
+# before running the expensive main model. Saves GPU time on silent/music-only chunks.
+# Set to "" to disable. Common choices: "tiny" (~75MB, fastest), "base" (~150MB, more accurate).
+gate_model = "tiny"
+
+
+[mpv]
+# Path to mpv executable — leave commented out if mpv is on PATH or in a standard location
+# executable = "C:/path/to/mpv.exe"
+
+# Set to true to launch a new mpv instance on startup
+start_mpv = false
+
+# Must match input-ipc-server in mpv.conf
+# Windows named-pipe form: \\.\pipe\mpvsocket  → use "mpvsocket" here
+ipc_socket = "mpvsocket"
+
+# Keybinding to toggle mpv-translate on/off
+toggle_binding = "ctrl+."
+
+
+[subtitle]
+# Where translated subtitle (.srt) files are stored
+path = "~/.config/mpv-translate/subs"
+
+# true  → always store subs in 'path' above
+# false → store alongside the local video file (.translate.srt)
+only_network = false
+
+# Vertical padding from the bottom edge in a 1280×720 virtual space (MPV scales to actual size).
+# 0 = flush with the bottom edge; increase to push subtitles higher up the screen.
+margin_bottom = 50
+
+
+[ocr]
+# Set to true to enable on-screen text detection (OCR) and translation.
+# Requires: pip install easyocr transformers sentencepiece
+enabled = true
+
+# How often to capture and OCR a video frame (seconds).
+interval = 1.0
+
+# Skip any text block (or combined result) longer than this many characters.
+# Prevents translating large bodies of text like full paragraphs or title cards.
+max_chars = 120
+
+# Minimum easyocr recognition confidence (0.0–1.0).
+min_confidence = 0.5
+
+# Drop detected text blocks shorter than this many characters.
+# Filters single-character noise (stray digits, punctuation) that fragment into "1 0 0 5"-style garbage.
+min_length = 2
+
+# Languages for easyocr detection and recognition.
+# Must match the language of on-screen text in your video.
+# Supported easyocr languages: ja, ko, zh_sim, zh_tra, th, vi, id, ms, tl,
+#   en, de, fr, es, it, pt, nl, pl, ru, uk, cs, ro, hu, el, tr, ar, fa, hi, bn, ta,
+#   sv, da, no, fi, hr, sk, sl, bg, sr, mk, ka, hy, az, kk, uz, mn, ne, si, my, km, lo
+language = ["ja"]
+
+# Vertical offset from the top edge in the 1280×720 virtual OSD space.
+margin_top = 30
+
+# Fraction of frame width/height defining corner exclusion zones (0.0–0.5).
+# Text whose centre falls inside a corner region this size is treated as a watermark and ignored.
+corner_fraction = 0.1
+
+# How many consecutive frames each individual text block must appear before showing it.
+# Per-block tracking: OCR noise in one region does not reset stability for others.
+# Higher = less flicker on scene changes; lower = faster to appear.
+stability_frames = 2
+
+# Seconds ahead of current playback to read frames from the video file.
+# Proactive: always captures ahead, even before text appears on screen.
+# A Bayesian scheduler adapts both the offset and polling interval — it
+# shrinks near expected transitions for precise timing and grows during
+# stable periods for early detection.
+# 0.0 = always capture the current MPV frame (no lookahead).
+# >0  = decode ahead via av; 3–5s works well.
+lookahead_seconds = 3.0
+
+# Language codes for OPUS-MT translation (Helsinki-NLP/opus-mt-{src}-{tgt}).
+# The model is downloaded automatically the first time a pair is used.
+#
+# Common source → English pairs (set target_lang = "en"):
+#   ja → en    zh → en    ko → en    vi → en    th → en    id → en
+#   de → en    fr → en    es → en    it → en    pt → en    nl → en
+#   ru → en    uk → en    pl → en    cs → en    ro → en    hu → en
+#   ar → en    fa → en    he → en    hi → en    tr → en    el → en
+#   sv → en    da → en    fi → en    bg → en
+#
+# English → other pairs (set source_lang = "en"):
+#   en → ja    en → zh    en → ko    en → de    en → fr    en → es
+#   en → it    en → pt    en → nl    en → ru    en → ar    en → hi
+#
+# Non-English pairs (check Helsinki-NLP for availability):
+#   ja → zh    zh → ja    ko → ja    de → fr    fr → de    es → pt
+source_lang = "ja"
+target_lang = "en"
+
+# Use GPU for easyocr inference.
+gpu = true
+
+# After showing the same OCR text for this many seconds, hide the overlay.
+# 0.0 = keep showing indefinitely.  15.0 works well for most title cards.
+max_display_seconds = 15.0
+
+# Suppress text blocks present in every consecutive OCR frame for at least this many
+# frames (treats them as permanent watermarks).  0 = disabled.
+# With interval = 1.0 s, a value of 10 filters studio logos after 10 s of persistence.
+# New blocks that appear after the watermarks are filtered out will show cleanly.
+watermark_frames = 10
+
+# Minimum seconds to keep the overlay visible after showing it.
+# Brief text cards stay on screen long enough to read even if the source text vanishes.
+min_display_seconds = 3.0
+
+# Suppress re-showing identical text within this many seconds.
+# Prevents title cards that fade in/out from being displayed twice.
+cooldown_seconds = 30.0

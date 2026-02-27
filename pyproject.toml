@@ -1,0 +1,38 @@
+[project]
+name = "mpv-translate"
+version = "0.1.0"
+description = "Live offline translation overlay for MPV using Whisper"
+requires-python = ">=3.9"
+dependencies = [
+    "attrs>=23.2.0",
+    "av>=12.3.0",
+    "cattrs>=23.2.3",
+    "click>=8.1.7",
+    "faster-whisper>=1.0.1",
+    "more_itertools>=10.2.0",
+    "numpy>2.0.0",
+    "python_mpv_jsonipc>=1.2.0",
+    "toml>=0.10.2",
+]
+
+[project.optional-dependencies]
+# Install for on-screen text OCR + translation:
+#   pip install "mpv-translate[ocr]"
+ocr = [
+    "easyocr>=1.7.1",
+    "transformers>=4.20.0",
+    "sentencepiece>=0.1.96",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+mpv-translate = "mpv_translate.cli:cli"
+mpv-translate-direct = "mpv_translate.cli:direct"
+
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mpv_translate*"]

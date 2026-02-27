@@ -1,0 +1,4 @@
+-- mpv-translate stub
+-- This file exists only to prevent MPV's "Cannot find main.*" warning.
+-- mpv-translate is a Python script launched separately via launch.bat / launch.sh
+-- and communicates with MPV over the IPC socket.

@@ -1,0 +1,10 @@
+# Core
+faster-whisper
+av
+numpy
+more-itertools
+click
+python-mpv-jsonipc
+cattrs
+attrs
+toml
