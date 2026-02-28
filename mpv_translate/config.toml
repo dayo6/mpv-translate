@@ -97,7 +97,7 @@ gate_model = "tiny"
 
 [mpv]
 # Path to mpv executable — leave commented out if mpv is on PATH or in a standard location
-executable = "C:/Users/danie/Downloads/mpv-x86_64-20251023-git-aa2dad0/mpv.exe"
+executable = "C:/Path/To/Executable/mpv.exe"
 
 # Set to true to launch a new mpv instance on startup
 start_mpv = false
