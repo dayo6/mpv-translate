@@ -1,14 +1,75 @@
 import logging
+import pathlib
+import re
+import shutil
 import time
 from typing import Optional
 
 import click
 from python_mpv_jsonipc import MPVError
 
+from .config import Config, get_config_path
 from .coreloop import core_loop
 from .monitor import MPVMonitor
 from .subtitle import SRTFile
 from .translate import get_model
+
+
+def _resolve_executable(cfg: Config) -> None:
+    """Check if the configured MPV executable exists; prompt if not found."""
+    if not cfg.mpv.start_mpv:
+        return
+
+    exe = cfg.mpv.executable
+    if exe and (pathlib.Path(exe).is_file() or shutil.which(exe)):
+        return
+
+    which_mpv = shutil.which("mpv")
+
+    if exe:
+        click.echo(f"MPV executable not found: {exe}")
+    else:
+        click.echo("MPV executable path not configured.")
+
+    while True:
+        prompt_kwargs: dict = {"text": "Enter path to mpv executable"}
+        if which_mpv:
+            prompt_kwargs["default"] = which_mpv
+        answer = click.prompt(**prompt_kwargs)
+        answer = answer.strip().strip('"').strip("'")
+        resolved = pathlib.Path(answer)
+        if resolved.is_file():
+            cfg.mpv.executable = str(resolved)
+            _save_executable(str(resolved))
+            click.echo(f"Saved mpv executable: {resolved}")
+            return
+        found = shutil.which(answer)
+        if found:
+            cfg.mpv.executable = found
+            _save_executable(found)
+            click.echo(f"Saved mpv executable: {found}")
+            return
+        click.echo(f"Not found: {answer}")
+
+
+def _save_executable(exe_path: str) -> None:
+    """Persist the executable path to the loaded config file."""
+    config_path = get_config_path()
+    if not config_path:
+        return
+    # Normalise to forward slashes for TOML compatibility.
+    exe_path = exe_path.replace("\\", "/")
+    text = config_path.read_text(encoding="utf8")
+    new_line = f'executable = "{exe_path}"'
+    new_text, count = re.subn(
+        r'^[#\s]*executable\s*=\s*"[^"]*"',
+        new_line,
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count:
+        config_path.write_text(new_text, encoding="utf8")
 
 
 @click.command()
@@ -31,13 +92,16 @@ def cli(path: Optional[str], loglevel: str):
                    "huggingface_hub", "PIL.PngImagePlugin"):
         logging.getLogger(_noisy).setLevel(logging.WARNING)
 
+    # Validate MPV executable before loading heavy models.
+    from .config import get_config      # noqa: PLC0415
+    _cfg = get_config()
+    _resolve_executable(_cfg)
+
     # Pre-load the Whisper model so the first seek/play is fast
     get_model()
 
     # Pre-load OCR models so they are ready before the first file plays
-    from .config import get_config      # noqa: PLC0415
     from .ocr import warm_up            # noqa: PLC0415
-    _cfg = get_config()
     if _cfg.ocr.enabled:
         warm_up(_cfg.ocr)
         from .ocr_translate import warm_up as translate_warm_up  # noqa: PLC0415

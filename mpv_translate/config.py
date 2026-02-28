@@ -166,11 +166,21 @@ class Config:
     ocr: OcrConfig = field(factory=OcrConfig)
 
 
+_loaded_config_path: Optional[pathlib.Path] = None
+
+
+def get_config_path() -> Optional[pathlib.Path]:
+    """Return the path of the config file that was loaded (or None)."""
+    return _loaded_config_path
+
+
 def load_config_paths(*paths: pathlib.Path) -> "Config":
+    global _loaded_config_path
     for p in paths:
         if not p.exists():
             continue
         logging.getLogger("config").info("using configuration from %s", p)
+        _loaded_config_path = p
         text = p.read_text(encoding="utf8")
         try:
             raw: Any = toml.loads(text)
