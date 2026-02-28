@@ -91,6 +91,7 @@ class AudioReader:
 
         resampler = av.AudioResampler(format="s16", layout="mono", rate=self._sampling_rate)
         chunk_frames = list(_resample_frames(_group_frames(chunk, 500000), resampler))
+        del resampler
 
         if not chunk_frames:
             return None

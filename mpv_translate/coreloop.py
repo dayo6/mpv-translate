@@ -25,7 +25,7 @@ from typing import Generator, Optional, Union
 
 from .audio import AudioReader
 from .config import get_config
-from .subtitle import SRTFile
+from .subtitle import SRTFile, hms
 from .translate import Segment, translate_chunk, has_words
 
 
@@ -106,7 +106,7 @@ def core_loop(
     lookback = config.translate.lookback_seconds
     current_pos = max(0.0, position - lookback)
     log.debug(
-        "starting at %.2fs (position=%.2fs, lookback=%.2fs)", current_pos, position, lookback
+        "starting at %s (position=%s, lookback=%.1fs)", hms(current_pos), hms(position), lookback
     )
 
     # After a seek we use a shorter first chunk so the initial subtitle appears quickly.
@@ -132,7 +132,7 @@ def core_loop(
                 probed_speech = None  # no probe — must run gate check below
 
             if result is None:
-                log.info("no more audio at %.2fs — finished", current_pos)
+                log.info("no more audio at %s — finished", hms(current_pos))
                 yield True
                 break
 
@@ -145,8 +145,11 @@ def core_loop(
             # When the prefetch already probed, reuse its result.
             has_speech = probed_speech if probed_speech is not None else has_words(chunk, lang)
 
+            if cancel.is_set():
+                break
+
             if not has_speech:
-                log.debug("no words at %.2fs — skipping chunk", chunk_start)
+                log.debug("no words at %s — skipping chunk", hms(chunk_start))
                 current_pos = chunk_start + max_duration
                 continue
 
@@ -162,12 +165,15 @@ def core_loop(
                     if lead <= max_lead:
                         break
                     log.debug(
-                        "audio %.0fs ahead (chunk=%.1f, playback=%.1f), waiting",
-                        lead, chunk_start, playback,
+                        "audio %.0fs ahead (chunk=%s, playback=%s), waiting",
+                        lead, hms(chunk_start), hms(playback),
                     )
                     cancel.wait(1.0)
 
-            log.debug("translating chunk at %.2fs", chunk_start)
+            if cancel.is_set():
+                break
+
+            log.debug("translating chunk at %s", hms(chunk_start))
             t0 = time.time()
 
             # ── translate (offline via Whisper) ──────────────────────────────
@@ -177,7 +183,7 @@ def core_loop(
                 segments, lang = translate_chunk(chunk, lang)
 
             elapsed = time.time() - t0
-            log.debug("chunk %.2fs → %d segments in %.2fs", chunk_start, len(segments), elapsed)
+            log.debug("chunk %s → %d segments in %.2fs", hms(chunk_start), len(segments), elapsed)
 
             # word_end_padding can extend a segment's end past the next segment's start,
             # causing both to show simultaneously. Cap each segment at the next one's start

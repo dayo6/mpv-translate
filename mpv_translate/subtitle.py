@@ -3,6 +3,12 @@ import textwrap
 from typing import Any, Literal, Optional, TextIO, Type
 
 
+def hms(pos: float) -> str:
+    """Format seconds as HH:MM:SS for log output."""
+    s = int(pos)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
 def to_time_format(pos: float) -> str:
     secs = pos % 60
     mins = int((pos // 60) % 60)

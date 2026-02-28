@@ -89,6 +89,10 @@ suppress_hallucinations = true
 # Increase to let Whisper buffer further ahead; set to 0 to never throttle.
 max_lead = 0
 
+# Maximum seconds to wait for a Whisper transcribe/translate call to finish (0 = unlimited).
+# If inference exceeds this, the result is discarded and the chunk is skipped.
+timeout = 0
+
 # Word-detection pre-filter: a small Whisper model checks if actual words are spoken
 # before running the expensive main model. Saves GPU time on silent/music-only chunks.
 # Set to "" to disable. Common choices: "tiny" (~75MB, fastest), "base" (~150MB, more accurate).
@@ -126,6 +130,10 @@ margin_bottom = 50
 # Font size for audio subtitles in the 1280×720 virtual OSD space.
 # 0 = use MPV's default (~48).
 font_size = 0
+
+# Hide each audio subtitle after it has been on screen for this many seconds (0 = disabled).
+# Prevents subtitles from lingering when last_segment_hold or gap_fill_threshold extend them.
+max_display_seconds = 0.0
 
 
 [ocr]
@@ -199,13 +207,13 @@ gpu = true
 
 # After showing the same OCR text for this many seconds, hide the overlay.
 # 0.0 = keep showing indefinitely.  15.0 works well for most title cards.
-max_display_seconds = 15.0
+max_display_seconds = 9.0
 
 # Suppress text blocks present in every consecutive OCR frame for at least this many
 # frames (treats them as permanent watermarks).  0 = disabled.
-# With interval = 1.0 s, a value of 10 filters studio logos after 10 s of persistence.
+# With interval = 1.0 s, a value of 5 filters studio logos after ~5 s of persistence.
 # New blocks that appear after the watermarks are filtered out will show cleanly.
-watermark_frames = 10
+watermark_frames = 5
 
 # Minimum seconds to keep the overlay visible after showing it.
 # Brief text cards stay on screen long enough to read even if the source text vanishes.
@@ -237,4 +245,8 @@ font_size = 24
 # Requires local video file for arbitrary frame access.
 binary_refine = false
 
-gpu_mode = "interleave"
+# Maximum seconds to wait for an OCR translation call to finish (0 = unlimited).
+# Covers easyocr detection, recognition, and MarianMT translation.
+timeout = 0
+
+gpu_mode = "simultaneous"

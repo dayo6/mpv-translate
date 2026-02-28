@@ -68,16 +68,19 @@ def _ass_event(text: str, margin_bottom: int = 50, font_size: int = 0) -> str:
 class OverlayManager:
     """Drives a single MPV osd-overlay for subtitle display."""
 
-    def __init__(self, command: Callable, margin_bottom: int = 50, font_size: int = 0):
+    def __init__(self, command: Callable, margin_bottom: int = 50, font_size: int = 0,
+                 max_display_seconds: float = 0.0):
         """
         Args:
-            command:       MPVMonitor.command — forwards calls to MPV JSON IPC.
-            margin_bottom: Pixels from the bottom edge in the 1280×720 virtual OSD space.
-            font_size:     Font size in the 1280×720 virtual OSD space (0 = MPV default).
+            command:             MPVMonitor.command — forwards calls to MPV JSON IPC.
+            margin_bottom:       Pixels from the bottom edge in the 1280×720 virtual OSD space.
+            font_size:           Font size in the 1280×720 virtual OSD space (0 = MPV default).
+            max_display_seconds: Hide subtitle after this many seconds on screen (0 = disabled).
         """
         self._cmd = command
         self._margin_bottom = margin_bottom
         self._font_size = font_size
+        self._max_display = max_display_seconds
         self._segments: List[Tuple[float, float, str]] = []
         self._starts: List[float] = []
         self._lock = threading.Lock()
@@ -117,6 +120,8 @@ class OverlayManager:
                 return ""
             start, end, text = self._segments[idx]
             if pos < end:
+                if self._max_display > 0 and pos - start >= self._max_display:
+                    return ""
                 return text
         return ""
 

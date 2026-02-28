@@ -158,6 +158,14 @@ def _load_model(device: str, compute_type: str, extra_args: dict) -> WhisperMode
     return WhisperModel(config.model.model, local_files_only=True, **args)
 
 
+def cleanup() -> None:
+    """Release cached models and shut down the whisper thread pool."""
+    global _model, _gate
+    _model = None
+    _gate = None
+    _whisper_pool.shutdown(wait=False, cancel_futures=True)
+
+
 def get_model() -> WhisperModel:
     global _model, _model_device
     if _model is not None:
@@ -293,7 +301,7 @@ def _seg_end(s: Any, padding: float = 0.0) -> float:
 _HALLUCINATION_RE = re.compile(
     r"^\s*(?:"
     # YouTube-style calls to action
-    r"thank(?:s| you)(?: (?:so|very) much)? for (?:watching|viewing|listening)\b.*"
+    r"(?:thank(?:s| you)[,.]?\s*)*thank(?:s| you)(?: (?:so|very) much)? for (?:your )?(?:watching|viewing|listening)\b.*"
     r"|please (?:like|subscribe|share|comment)\b.*"
     r"|(?:like|subscribe)(?:,? and|,) (?:subscribe|like|share|comment|the channel)\b.*"
     r"|don'?t forget to (?:like|subscribe|share)\b.*"

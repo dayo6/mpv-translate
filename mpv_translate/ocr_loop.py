@@ -35,6 +35,8 @@ from contextlib import nullcontext
 from threading import Event
 from typing import TYPE_CHECKING, Callable, Optional
 
+from .subtitle import hms
+
 if TYPE_CHECKING:
     from .config import Config
     from .overlay import PushOverlay
@@ -157,6 +159,7 @@ class OcrLoop:
         self._last_shown_raw: str = ""   # raw text that produced the current overlay
         # Display duration limiting
         self._shown_at: Optional[float] = None
+        self._display_start: Optional[float] = None  # when overlay first became visible (survives text variation)
         self._expired: set = set()       # combined texts suppressed after expiry
         # Cooldown: recently shown text → monotonic time first shown.
         # Prevents title cards that fade in/out from being shown twice.
@@ -184,12 +187,20 @@ class OcrLoop:
     def start(self, first_ready: Optional[Event] = None):
         """Start the OCR polling thread."""
         if self._thread and self._thread.is_alive():
-            return
+            self._stop.set()
+            self._thread.join(timeout=1.0)
+            if self._thread.is_alive():
+                log.warning("OCR thread did not exit in time — abandoning old thread")
+                # Old thread is a daemon; it will notice _stop eventually.
+                # Give the new thread its own stop event so .clear() below
+                # doesn't accidentally un-stop the zombie.
+                self._stop = threading.Event()
         self._stop.clear()
         self._block_ages = {}
         self._block_bboxes = {}
         self._last_shown_raw = ""
         self._shown_at = None
+        self._display_start = None
         self._expired.clear()
         self._recently_shown.clear()
         self._first_ready = first_ready
@@ -211,6 +222,7 @@ class OcrLoop:
         self._block_bboxes = {}
         self._last_shown_raw = ""
         self._shown_at = None
+        self._display_start = None
         self._expired.clear()
         self._recently_shown.clear()
         self._first_ready = None
@@ -233,6 +245,17 @@ class OcrLoop:
             # Release GPU priority so audio translation can proceed.
             if self._gpu is not None:
                 self._gpu.clear_ocr_priority()
+
+    def _prune_recently_shown(self) -> None:
+        """Remove entries older than cooldown_seconds to prevent unbounded growth."""
+        cooldown = self._cfg.cooldown_seconds
+        if cooldown <= 0 or len(self._recently_shown) < 64:
+            return
+        now = time.monotonic()
+        self._recently_shown = {
+            k: t for k, t in self._recently_shown.items()
+            if now - t < cooldown
+        }
 
     @staticmethod
     def _bboxes_overlap(a: tuple, b: tuple, tolerance: int = 50) -> bool:
@@ -271,7 +294,7 @@ class OcrLoop:
                 log.debug("reusing %d cached watermark(s)", len(self._watermarks))
             return
 
-        timestamps = [duration * f for f in (0.1, 0.3, 0.5, 0.7, 0.9)]
+        timestamps = [duration * f for f in (0.02, 0.05, 0.1, 0.3, 0.5, 0.7, 0.9)]
         # Collect (text, bbox) from every frame for spatial matching.
         all_frame_blocks: list[list[tuple[str, tuple]]] = []
         n_captured = 0
@@ -281,7 +304,11 @@ class OcrLoop:
                 return
             if not capture_frame_av(path, ts, tmpfile):
                 continue
+            if self._stop.is_set():
+                return
             blocks = extract_blocks(tmpfile, self._cfg)
+            if self._stop.is_set():
+                return
             frame_blocks = [(t, b) for t, b in blocks if len(t) <= self._cfg.max_chars]
             all_frame_blocks.append(frame_blocks)
             n_captured += 1
@@ -703,9 +730,13 @@ class OcrLoop:
 
             log.info("OCR translation: %r -> %r", raw, translation)
             self._overlay.show(translation)
+            if not self._last_shown_raw:
+                # Hidden → visible: start the display-expiry clock.
+                self._display_start = time.monotonic()
             self._last_shown_raw = raw
             self._shown_at = time.monotonic()
             self._recently_shown[raw] = time.monotonic()
+            self._prune_recently_shown()
         else:
             # Text disappeared.
             if self._last_shown_raw:
@@ -717,18 +748,22 @@ class OcrLoop:
             self._overlay.hide()
             self._last_shown_raw = ""
             self._shown_at = None
+            self._display_start = None
 
     def _check_display_expiry(self) -> None:
         """Hide the overlay if the current text has been shown too long."""
         if (self._last_shown_raw
                 and self._cfg.max_display_seconds > 0
-                and self._shown_at is not None
-                and time.monotonic() - self._shown_at
+                and self._display_start is not None
+                and time.monotonic() - self._display_start
                 >= self._cfg.max_display_seconds):
             self._overlay.hide()
+            if len(self._expired) >= 200:
+                self._expired.clear()
             self._expired.add(self._last_shown_raw)
             self._last_shown_raw = ""
             self._shown_at = None
+            self._display_start = None
 
     def _loop_scan(self, tmpfile: str):
         """Main loop for lookahead mode: binary-search scan → display → repeat.
@@ -749,58 +784,61 @@ class OcrLoop:
         while not self._stop.is_set():
             # ── Phase A: Catch-up scan to audio frontier ─────────────────
             if (self._gpu is not None
-                    and self._gpu._ocr_priority.is_set()
-                    and self._gpu.audio_frontier > scan_pos):
+                    and self._gpu._ocr_priority.is_set()):
 
                 frontier = self._gpu.audio_frontier
-                try:
-                    path = str(self._cmd("get_property", "path") or "")
-                except Exception:
-                    path = ""
+                if frontier > scan_pos:
+                    try:
+                        path = str(self._cmd("get_property", "path") or "")
+                    except Exception:
+                        path = ""
 
-                if path:
-                    log.debug(
-                        "OCR catch-up: scanning %.1f → %.1f",
-                        scan_pos, frontier,
-                    )
-                    while scan_pos < frontier and not self._stop.is_set():
-                        try:
-                            entries = self._scan_window(path, scan_pos, tmpfile)
-                        except Exception:
-                            log.warning("scan_window error in catch-up", exc_info=True)
-                            entries = []
-                        pending.extend(entries)
-                        scan_pos += self._cfg.lookahead_seconds
+                    if path:
+                        log.debug(
+                            "OCR catch-up: scanning %.1f → %.1f",
+                            scan_pos, frontier,
+                        )
+                        while scan_pos < frontier and not self._stop.is_set():
+                            try:
+                                entries = self._scan_window(path, scan_pos, tmpfile)
+                            except Exception:
+                                log.warning("scan_window error in catch-up", exc_info=True)
+                                entries = []
+                            pending.extend(entries)
+                            scan_pos += self._cfg.lookahead_seconds
 
                 # Done catching up — let audio proceed with its next chunk.
                 self._gpu.clear_ocr_priority()
                 log.debug("OCR catch-up done, released priority")
 
-            # ── Phase B: Display queued entries from catch-up ─────────────
+            # ── Phase B: Display queued entries at playback time ──────────
             while pending and not self._stop.is_set():
-                # Interrupt display if audio yielded again (new catch-up needed).
+                # Interrupt display if audio yielded again.
                 if (self._gpu is not None
-                        and self._gpu._ocr_priority.is_set()
-                        and self._gpu.audio_frontier > scan_pos):
+                        and self._gpu._ocr_priority.is_set()):
                     break
 
-                video_ts, raw, translation = pending.pop(0)
-                self._wait_for_pos(video_ts)
-                if self._stop.is_set():
+                video_ts, raw, translation = pending[0]
+                try:
+                    current = float(self._cmd("get_property", "time-pos") or 0.0)
+                except Exception:
                     break
+                if current < video_ts - 0.2:
+                    break  # not due yet — continue scanning ahead
+                pending.pop(0)
                 self._show_entry(raw, translation)
                 self._notify_ready()
 
-            # If a new catch-up is needed, loop back to Phase A immediately.
+            # If audio yielded, loop back to Phase A immediately.
             if (self._gpu is not None
-                    and self._gpu._ocr_priority.is_set()
-                    and self._gpu.audio_frontier > scan_pos):
+                    and self._gpu._ocr_priority.is_set()):
                 continue
 
-            # ── Phase C: Normal mode — single window at playback position ─
+            # ── Phase C: Proactive scan ahead of playback ─────────────────
             try:
                 pos = float(self._cmd("get_property", "time-pos") or 0.0)
                 path = str(self._cmd("get_property", "path") or "")
+                duration = float(self._cmd("get_property", "duration") or 0.0)
             except Exception:
                 if self._stop.wait(1.0):
                     break
@@ -811,33 +849,36 @@ class OcrLoop:
                     break
                 continue
 
-            scan_pos = pos
+            # Only reset scan_pos if playback jumped ahead of it.
+            if scan_pos < pos:
+                scan_pos = pos
+
             self._check_display_expiry()
 
+            # Reached end of video — wait for pending entries to display.
+            if duration > 0 and scan_pos >= duration:
+                self._notify_ready()
+                if self._stop.wait(0.5 if pending else self._cfg.interval):
+                    break
+                continue
+
             try:
-                entries = self._scan_window(path, pos, tmpfile)
+                entries = self._scan_window(path, scan_pos, tmpfile)
             except Exception:
                 log.warning("scan_window error", exc_info=True)
                 entries = []
 
-            scan_pos = pos + self._cfg.lookahead_seconds
+            scan_pos += self._cfg.lookahead_seconds
 
-            if not entries:
-                self._notify_ready()
-                if self._stop.wait(self._cfg.interval):
+            if entries:
+                pending.extend(entries)
+            else:
+                if not pending:
+                    self._notify_ready()
+                # Brief pause when scan found nothing — avoids hammering
+                # on corrupt video sections or empty stretches.
+                if self._stop.wait(0.1):
                     break
-                continue
-
-            for video_ts, raw, translation in entries:
-                if self._stop.is_set():
-                    break
-
-                self._wait_for_pos(video_ts)
-                if self._stop.is_set():
-                    break
-
-                self._show_entry(raw, translation)
-                self._notify_ready()
 
     # ── tick-based polling mode (no lookahead) ────────────────────────────
 
@@ -981,9 +1022,9 @@ class OcrLoop:
                             text, self._cfg.source_lang, self._cfg.target_lang,
                         )
                     log.info(
-                        "poll-refine: text appeared at %.1fs "
-                        "(polled %.1f→%.1f), %r -> %r",
-                        start_ts, prev_ts, pos, text, translation,
+                        "poll-refine: text appeared at %s "
+                        "(polled %s→%s), %r -> %r",
+                        hms(start_ts), hms(prev_ts), hms(pos), text, translation,
                     )
                     self._show_entry(text, translation)
                     prev_text = text
@@ -992,8 +1033,8 @@ class OcrLoop:
             elif not has_text and prev_had_text:
                 # ── Text disappeared ──────────────────────────────────────
                 log.info(
-                    "poll-refine: text disappeared (polled %.1f→%.1f)",
-                    prev_ts, pos,
+                    "poll-refine: text disappeared (polled %s→%s)",
+                    hms(prev_ts), hms(pos),
                 )
                 self._show_entry("", "")
                 prev_text = ""
@@ -1031,9 +1072,9 @@ class OcrLoop:
                             text, self._cfg.source_lang, self._cfg.target_lang,
                         )
                     log.info(
-                        "poll-refine: text changed at %.1fs "
-                        "(polled %.1f→%.1f), %r -> %r",
-                        change_ts, prev_ts, pos, text, translation,
+                        "poll-refine: text changed at %s "
+                        "(polled %s→%s), %r -> %r",
+                        hms(change_ts), hms(prev_ts), hms(pos), text, translation,
                     )
                     self._show_entry(text, translation)
                     prev_text = text
@@ -1086,14 +1127,17 @@ class OcrLoop:
                 # Still enforce display duration limit even when skipping OCR.
                 if (self._last_shown_raw
                         and self._cfg.max_display_seconds > 0
-                        and self._shown_at is not None
-                        and time.monotonic() - self._shown_at >= self._cfg.max_display_seconds):
+                        and self._display_start is not None
+                        and time.monotonic() - self._display_start >= self._cfg.max_display_seconds):
                     log.debug("ocr overlay expired after %.0fs (frame unchanged)", self._cfg.max_display_seconds)
                     self._sched.notify(False, time.monotonic())
                     self._overlay.hide()
+                    if len(self._expired) >= 200:
+                        self._expired.clear()
                     self._expired.add(self._last_shown_raw)
                     self._last_shown_raw = ""
                     self._shown_at = None
+                    self._display_start = None
                 return
             # max skips reached — fall through to full OCR
         self._diff_skip = 0
@@ -1196,6 +1240,16 @@ class OcrLoop:
                 new_ages[bk] = prev_age + 1
             else:
                 new_ages[b] = self._block_ages.get(b, 0) + 1
+        # Preserve ages for blocks not seen this frame (they may reappear after
+        # a brief scene cut or empty frame).  Without this, watermark age
+        # counters reset to 0 every time the screen goes blank and the
+        # watermark has to re-earn its way to watermark_frames from scratch.
+        # Only preserve entries with meaningful age (>= stability_frames) to
+        # prevent unbounded growth from transient text.
+        sf_threshold = max(sf, 2)
+        for key, age in self._block_ages.items():
+            if key not in new_ages and age >= sf_threshold:
+                new_ages[key] = age
         self._block_ages = new_ages
 
         # 3c. Per-block stability filter — only keep blocks seen in >=
@@ -1203,10 +1257,9 @@ class OcrLoop:
         #     independently, so OCR noise in one region does not reset
         #     stability for other regions.
         #     First detection (nothing showing yet) skips the filter so text
-        #     appears immediately.  When watermarks have been pre-scanned,
-        #     non-watermark text is already trusted — skip stability entirely.
+        #     appears immediately.
         sf = self._cfg.stability_frames
-        if sf > 1 and self._last_shown_raw and not self._watermark_path:
+        if sf > 1 and self._last_shown_raw:
             raw_blocks = [
                 b for b in raw_blocks
                 if self._block_ages.get(block_bbox_key.get(b, b), 0) >= sf
@@ -1258,23 +1311,25 @@ class OcrLoop:
             self._overlay.hide()
             self._last_shown_raw = ""
             self._shown_at = None
-            # True scene cut (no blocks detected at all) resets watermark age counters
-            # so the next scene starts fresh.
-            if wf > 0 and not raw_blocks_detected:
-                self._block_ages = {}
+            self._display_start = None
+            # Note: block ages are intentionally preserved across empty frames
+            # so that watermark counters are not reset by brief scene cuts.
             self._notify_ready()
             return
 
         # 7. Already showing this exact text — enforce display duration limit.
         if combined == self._last_shown_raw:
             if (self._cfg.max_display_seconds > 0
-                    and self._shown_at is not None
-                    and time.monotonic() - self._shown_at >= self._cfg.max_display_seconds):
+                    and self._display_start is not None
+                    and time.monotonic() - self._display_start >= self._cfg.max_display_seconds):
                 log.debug("ocr overlay expired after %.0fs", self._cfg.max_display_seconds)
                 self._sched.notify(False, time.monotonic())
                 self._overlay.hide()
                 self._last_shown_raw = ""
                 self._shown_at = None
+                self._display_start = None
+                if len(self._expired) >= 200:
+                    self._expired.clear()
                 self._expired.add(combined)
             return
 
@@ -1311,15 +1366,20 @@ class OcrLoop:
             now = time.monotonic()
             if self._last_shown_raw:
                 self._sched.notify(False, now)
+            else:
+                # Hidden → visible: start the display-expiry clock.
+                self._display_start = now
             self._sched.notify(True, now)
             self._overlay.show(translation)
             self._last_shown_raw = combined
             self._shown_at = now
             self._recently_shown[combined] = now
+            self._prune_recently_shown()
         else:
             if self._last_shown_raw:
                 self._sched.notify(False, time.monotonic())
             self._overlay.hide()
             self._last_shown_raw = ""
             self._shown_at = None
+            self._display_start = None
         self._notify_ready()

@@ -17,7 +17,7 @@ import logging
 import pathlib
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event
 from typing import Any, Optional
 
@@ -28,8 +28,8 @@ from .coreloop import core_loop
 from .ocr_loop import OcrLoop
 from .overlay import OverlayManager, PushOverlay
 from .scheduler import GpuScheduler
-from .subtitle import SRTFile
-from .translate import get_model
+from .subtitle import SRTFile, hms
+from .translate import cleanup as _cleanup_models, get_model
 
 log = logging.getLogger("monitor")
 
@@ -56,7 +56,7 @@ class MPVMonitor:
         self._cancel.set()  # nothing running yet
         self._paused_by_seek = False  # True only when we paused MPV waiting for first subtitle
         self._ocr_seek_in_progress = False  # True while we manage OCR across a seek/load pause
-        self._overlay = OverlayManager(self.command, margin_bottom=self.config.subtitle.margin_bottom, font_size=self.config.subtitle.font_size)
+        self._overlay = OverlayManager(self.command, margin_bottom=self.config.subtitle.margin_bottom, font_size=self.config.subtitle.font_size, max_display_seconds=self.config.subtitle.max_display_seconds)
 
         # GPU scheduler: coordinates GPU access between audio and OCR pipelines.
         # Only used in "interleave" mode; "simultaneous" lets both run freely.
@@ -82,11 +82,15 @@ class MPVMonitor:
 
         # Single-worker pool: at most one translation job at a time.
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="translate")
+        self._current_future: Optional[Future] = None
+        self._launch_lock = threading.Lock()  # serializes _launch calls
+        self._generation = 0  # incremented on every launch/file-change; stale jobs check this
 
         # Seek debounce state
         self._seek_timer: Optional[threading.Timer] = None
         self._seek_lock = threading.Lock()
-        self._seek_debounce = 0.075  # seconds to wait after last seek before launching
+        self._seek_debounce = 0.30  # seconds to wait after last seek before launching
+        self._seek_generation = 0   # incremented per seek; stale _do_seek calls bail out
         self._translated_up_to: float = 0.0  # furthest translated position (seconds)
 
         self._register()
@@ -100,9 +104,16 @@ class MPVMonitor:
     def block(self):
         """Block until MPV quits."""
         self.shutdown.wait()
+        self._stop()
         self._overlay.shutdown()
         if self._ocr_loop:
             self._ocr_loop.shutdown()
+        with self._seek_lock:
+            if self._seek_timer is not None:
+                self._seek_timer.cancel()
+                self._seek_timer = None
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        _cleanup_models()
 
     # ── event registration ───────────────────────────────────────────────────
 
@@ -131,7 +142,7 @@ class MPVMonitor:
             position = float(self.command("get_property", "time-pos") or 0.0)
         except (MPVError, TypeError):
             position = 0.0
-        log.info("file already loaded on connect (%s @ %.2fs) — starting translation", path, position)
+        log.info("file already loaded on connect (%s @ %s) — starting translation", path, hms(position))
         self._launch(position=position)
         if self._ocr_loop:
             self._ocr_loop.start()
@@ -151,6 +162,7 @@ class MPVMonitor:
 
     def _on_start_file(self, _event: Any = None):
         """Cancel any running job and clear the overlay; the file is about to change."""
+        self._generation += 1  # invalidate any in-flight job immediately
         self._stop()
         self._overlay.clear()
         self._paused_by_seek = False
@@ -202,6 +214,16 @@ class MPVMonitor:
         cancel = None
         if self.enabled:
             cancel = self._launch(position=0.0, first_ready=first_ready)
+            # If _launch was skipped (lock busy from a concurrent stop/start),
+            # schedule a retry so the file still gets translated.
+            if cancel is None:
+                log.debug("file-loaded launch skipped — scheduling retry")
+                t = threading.Timer(
+                    0.5, self._retry_file_launch,
+                    args=(first_ready,),
+                )
+                t.daemon = True
+                t.start()
 
         if self._ocr_loop:
             self._ocr_loop.start(first_ready=ocr_first_ready)
@@ -216,6 +238,17 @@ class MPVMonitor:
                 daemon=True,
                 name="load-waiter",
             ).start()
+
+    def _retry_file_launch(self, first_ready: Optional[Event] = None):
+        """Retry a file-loaded launch that was skipped due to lock contention."""
+        if not self.enabled:
+            return
+        # If a job is already running (another launch succeeded), skip.
+        if self._current_future is not None and not self._current_future.done():
+            return
+        cancel = self._launch(position=0.0, first_ready=first_ready)
+        if cancel is None:
+            log.debug("file-loaded retry still blocked — giving up")
 
     def _on_seek(self, _event: Any = None):
         """Seek: cancel immediately, debounce rapid seeks, then restart.
@@ -232,14 +265,19 @@ class MPVMonitor:
         self._stop()
 
         with self._seek_lock:
+            # Bump generation so any already-running _do_seek bails out.
+            self._seek_generation += 1
+            gen = self._seek_generation
             # Cancel any pending debounce timer — we'll schedule a fresh one.
             if self._seek_timer is not None:
                 self._seek_timer.cancel()
-            self._seek_timer = threading.Timer(self._seek_debounce, self._do_seek)
+            self._seek_timer = threading.Timer(
+                self._seek_debounce, self._do_seek, args=(gen,),
+            )
             self._seek_timer.daemon = True
             self._seek_timer.start()
 
-    def _do_seek(self):
+    def _do_seek(self, seek_gen: int = 0):
         """Actually restart translation after the debounce window closes.
 
         Two modes:
@@ -249,6 +287,11 @@ class MPVMonitor:
           • **forward seek** (past the frontier): pause MPV, wait for the first
             subtitle from the new position, then resume.
         """
+        if self.shutdown.is_set():
+            return
+        # Stale seek — a newer one has been scheduled; bail out.
+        if seek_gen != self._seek_generation:
+            return
 
         # Clear stale state and give audio first GPU access after a seek.
         if self._gpu_scheduler:
@@ -265,8 +308,8 @@ class MPVMonitor:
         # re-translate or pause MPV.  Resume from the frontier.
         if self._translated_up_to > 0 and position < self._translated_up_to:
             log.info(
-                "seek to %.2fs (translated up to %.2fs) — resuming from frontier",
-                position, self._translated_up_to,
+                "seek to %s (translated up to %s) — resuming from frontier",
+                hms(position), hms(self._translated_up_to),
             )
             # If a previous seek paused MPV for us, resume now — we have content.
             if self._paused_by_seek:
@@ -276,9 +319,15 @@ class MPVMonitor:
                     pass
                 self._paused_by_seek = False
 
-            if self._ocr_loop:
-                self._ocr_loop.stop()
-                self._ocr_loop.start()
+            # Skip re-launch if a non-cancelled job is already running from
+            # the frontier.  If cancel is set the job is dying — launch a
+            # replacement so the pool queues it behind the exiting one.
+            if self._current_future is not None and not self._current_future.done():
+                if not self._cancel.is_set():
+                    return
+
+            # OCR reads from the current playback position — no restart needed
+            # for backward seeks.
 
             self._launch(
                 position=self._translated_up_to,
@@ -287,12 +336,17 @@ class MPVMonitor:
             return
 
         # ── forward seek (past the translated frontier) ─────────────────────
+        # Check generation again — another seek may have arrived while we
+        # were doing the work above.
+        if seek_gen != self._seek_generation:
+            return
+
         try:
             was_paused = bool(self.command("get_property", "pause"))
         except (MPVError, TypeError):
             was_paused = False
 
-        log.info("seek to %.2fs — launching new job", position)
+        log.info("seek to %s — launching new job", hms(position))
 
         # Create a resume mechanism if MPV is playing, OR if a previous seek already
         # paused it for us (_paused_by_seek).  Skip only when the user paused manually
@@ -313,11 +367,10 @@ class MPVMonitor:
                     self._paused_by_seek = False
                     self._ocr_seek_in_progress = False
 
-        # Restart the OCR loop at the new position (no priority — just let it
-        # run in the background without gating playback resumption).
-        if self._ocr_loop:
-            self._ocr_loop.stop()
-            self._ocr_loop.start()
+        # OCR reads from the current playback position — no need to restart it
+        # on within-file seeks.  Just reset the scheduler so timing adapts to
+        # the new position.  (File changes already restart OCR via
+        # _on_start_file / _on_file_loaded.)
 
         cancel = self._launch(
             position=position,
@@ -325,7 +378,20 @@ class MPVMonitor:
             translated_up_to=self._translated_up_to,
         )
 
-        if first_ready is not None and cancel is not None:
+        # If _launch was skipped (lock busy), retry after a short delay.
+        # The generation check at the top of _do_seek will bail out if a
+        # newer seek has arrived in the meantime.
+        if cancel is None:
+            log.debug("seek launch skipped — scheduling retry")
+            with self._seek_lock:
+                self._seek_timer = threading.Timer(
+                    0.5, self._do_seek, args=(seek_gen,),
+                )
+                self._seek_timer.daemon = True
+                self._seek_timer.start()
+            return
+
+        if first_ready is not None:
             max_wait = self.config.translate.max_wait
             threading.Thread(
                 target=self._wait_and_resume,
@@ -364,7 +430,11 @@ class MPVMonitor:
         first_ready: Optional[Event] = None,
         translated_up_to: float = 0.0,
     ) -> Optional[Event]:
-        """Start a new translation job and return its cancel Event, or None on failure."""
+        """Start a new translation job and return its cancel Event, or None on failure.
+
+        Thread-safe: uses a non-blocking lock so concurrent callers (e.g.
+        multiple debounced seeks) don't pile up waiting.
+        """
         if not self.enabled:
             return None
 
@@ -382,16 +452,38 @@ class MPVMonitor:
             except (MPVError, TypeError):
                 position = 0.0
 
-        # Create a fresh cancel event for the new job
-        cancel = Event()
-        self._cancel = cancel
+        # Non-blocking acquire: if another _launch is in progress, skip
+        # entirely and let the caller retry.  This prevents thread pile-ups
+        # during rapid file switching.
+        if not self._launch_lock.acquire(blocking=False):
+            log.debug("launch lock busy — skipping")
+            return None
+        try:
+            # Cancel the old job so it exits at the next check point.
+            self._cancel.set()
 
-        log.info("launching translation job: path=%s position=%.2f", path, position)
-        self._pool.submit(
-            self._run_job, path=path, position=position, cancel=cancel,
-            first_ready=first_ready, translated_up_to=translated_up_to,
-        )
-        return cancel
+            # Try to cancel a queued-but-not-started future outright.
+            if self._current_future is not None:
+                self._current_future.cancel()
+                # Don't wait — the pool serialises jobs and the stale one will
+                # exit via generation check.  Waiting here causes lock pile-ups
+                # during rapid file switching.
+
+            # Create a fresh cancel event for the new job.
+            self._generation += 1
+            gen = self._generation
+            cancel = Event()
+            self._cancel = cancel
+
+            log.info("launching translation job: path=%s position=%s", path, hms(position))
+            self._current_future = self._pool.submit(
+                self._run_job, path=path, position=position, cancel=cancel,
+                first_ready=first_ready, translated_up_to=translated_up_to,
+                generation=gen,
+            )
+            return cancel
+        finally:
+            self._launch_lock.release()
 
     # ── seek waiter ──────────────────────────────────────────────────────────
 
@@ -431,7 +523,8 @@ class MPVMonitor:
         return float(self.command("get_property", "time-pos") or 0.0)
 
     def _run_job(self, *, path: str, position: float, cancel: Event,
-                 first_ready: Optional[Event] = None, translated_up_to: float = 0.0):
+                 first_ready: Optional[Event] = None, translated_up_to: float = 0.0,
+                 generation: int = 0):
         try:
             for item in core_loop(
                 path=path, position=position, cancel=cancel,
@@ -439,7 +532,7 @@ class MPVMonitor:
                 gpu_scheduler=self._gpu_scheduler,
                 translated_up_to=translated_up_to,
             ):
-                if cancel.is_set():
+                if cancel.is_set() or self._generation != generation:
                     break
 
                 if isinstance(item, SRTFile):
@@ -447,6 +540,9 @@ class MPVMonitor:
                 elif item is True:
                     self.command("show-text", "mpv-translate: done")
                 elif isinstance(item, list):
+                    # Double-check generation before touching shared state.
+                    if self._generation != generation:
+                        break
                     # Chunk of (abs_start, abs_end, text) triples — hand to overlay.
                     self._overlay.add_segments(item)
                     # Track the furthest point we've translated.

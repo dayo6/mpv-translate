@@ -13,6 +13,8 @@ Filters applied after recognition:
 import logging
 from typing import TYPE_CHECKING, Callable, Optional
 
+from .subtitle import hms
+
 if TYPE_CHECKING:
     from PIL.Image import Image
 
@@ -55,20 +57,25 @@ def capture_frame_av(video_path: str, timestamp: float, output_path: str) -> boo
     """
     try:
         import av as _av  # noqa: PLC0415
-        safe_path = video_path if "://" in video_path else "file:" + video_path.replace("\\", "/")
-        with _av.open(safe_path) as container:
-            stream = next((s for s in container.streams if s.type == "video"), None)
-            if stream is None:
-                return False
-            # Seek to just before target using the stream's time_base.
-            target_ts = int(timestamp / stream.time_base)
-            container.seek(target_ts, stream=stream)
-            for frame in container.decode(stream):
-                img = frame.to_image()
-                img.save(output_path, format="PNG")
-                return True
+        # Suppress noisy h264 NAL-unit errors that flood the log on seek.
+        _av.logging.set_level(_av.logging.FATAL)
+        try:
+            safe_path = video_path if "://" in video_path else "file:" + video_path.replace("\\", "/")
+            with _av.open(safe_path) as container:
+                stream = next((s for s in container.streams if s.type == "video"), None)
+                if stream is None:
+                    return False
+                # Seek to just before target using the stream's time_base.
+                target_ts = int(timestamp / stream.time_base)
+                container.seek(target_ts, stream=stream)
+                for frame in container.decode(stream):
+                    img = frame.to_image()
+                    img.save(output_path, format="PNG")
+                    return True
+        finally:
+            _av.logging.set_level(_av.logging.ERROR)
     except Exception:
-        log.debug("av frame capture failed at %.2fs", timestamp, exc_info=True)
+        log.debug("av frame capture failed at %s", hms(timestamp), exc_info=True)
     return False
 
 

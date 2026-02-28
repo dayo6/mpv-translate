@@ -119,7 +119,9 @@ def cli(path: Optional[str], loglevel: str):
             if time.monotonic() >= deadline:
                 raise click.ClickException(
                     f"Could not connect to MPV IPC pipe within {timeout:.0f}s. "
-                    "Is MPV running with input-ipc-server enabled?"
+                    "Is MPV running with input-ipc-server enabled?\n"
+                    "  Fix: add this line to your mpv.conf:\n"
+                    "    input-ipc-server=\\\\.\\pipe\\mpvsocket"
                 )
             log.debug("MPV IPC pipe not ready, retrying…")
             time.sleep(interval)

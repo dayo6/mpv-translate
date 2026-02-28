@@ -62,7 +62,7 @@ class TranslateConfig:
     seek_chunk_duration: float = 12.0
     # After a seek, MPV is paused and waits up to this many seconds for the first subtitle
     # before resuming playback automatically (seconds).
-    max_wait: float = 6.0
+    max_wait: float = 0
     # Filter out common Whisper hallucination phrases (e.g. "Thanks for watching!").
     suppress_hallucinations: bool = True
     # Small Whisper model for word-level pre-filtering (empty string = disabled).
@@ -71,6 +71,9 @@ class TranslateConfig:
     # Maximum seconds audio translation may lead playback (0 = unlimited).
     # Audio pauses when it gets this far ahead, freeing GPU for OCR.
     max_lead: float = 30.0
+    # Maximum seconds to wait for a Whisper transcribe/translate call to finish (0 = unlimited).
+    # If inference exceeds this, the result is discarded and the chunk is skipped.
+    timeout: float = 0
 
 
 @dataclass(kw_only=True)
@@ -134,6 +137,9 @@ class OcrConfig:
     # precise appearance/disappearance boundaries.
     # Requires local video file (uses capture_frame_av).
     binary_refine: bool = False
+    # Maximum seconds to wait for an OCR translation call to finish (0 = unlimited).
+    # Covers easyocr detection, recognition, and MarianMT translation.
+    timeout: float = 0
     # GPU scheduling when both audio translation and OCR are active.
     # "interleave" = take turns: audio chunk → OCR catch-up → repeat
     # "simultaneous" = both use GPU at the same time (no scheduling)
@@ -153,6 +159,9 @@ class SubtitleConfig:
     # Font size for the audio subtitle overlay in the 1280×720 virtual OSD space.
     # 0 = use MPV's default (~48). Smaller values help with multi-line translations.
     font_size: int = 0
+    # Hide each audio subtitle after it has been on screen for this many seconds (0 = disabled).
+    # Useful when last_segment_hold or gap_fill_threshold extend subtitles longer than desired.
+    max_display_seconds: float = 0.0
 
     def get_subtitle(self, fname: str) -> pathlib.Path:
         if "://" in fname:
