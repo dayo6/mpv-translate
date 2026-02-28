@@ -5,6 +5,13 @@ import av
 import numpy as np
 
 
+def _safe_av_path(path):
+    """Prefix local paths with file: so ffmpeg won't parse @ # ? as URL syntax."""
+    if isinstance(path, str) and "://" not in path:
+        return "file:" + path.replace("\\", "/")
+    return path
+
+
 def _ignore_invalid_frames(frames):
     iterator = iter(frames)
     while True:
@@ -62,7 +69,7 @@ class AudioReader:
                 self._container.close()
             except Exception:
                 pass
-        self._container = av.open(self._input_file, mode="r", metadata_errors="ignore")
+        self._container = av.open(_safe_av_path(self._input_file), mode="r", metadata_errors="ignore")
 
     def _read(self, start: float, duration: float) -> "tuple[Any, float] | None":
         container = self._container
