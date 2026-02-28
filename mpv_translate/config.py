@@ -123,6 +123,10 @@ class OcrConfig:
     # Suppress re-showing the same text within this many seconds.
     # Prevents title cards that fade in/out from being shown twice.
     cooldown_seconds: float = 0.0
+    # Maximum vertical lines for the OCR overlay before merging onto fewer rows.
+    # Lines beyond this limit are joined side-by-side with " | ".
+    # 0 = unlimited (no redistribution).
+    max_lines: int = 3
 
 
 @dataclass(kw_only=True)
@@ -161,7 +165,13 @@ def load_config_paths(*paths: pathlib.Path) -> "Config":
         if not p.exists():
             continue
         logging.getLogger("config").info("using configuration from %s", p)
-        raw: Any = toml.loads(p.read_text(encoding="utf8"))
+        text = p.read_text(encoding="utf8")
+        try:
+            raw: Any = toml.loads(text)
+        except Exception:
+            # Retry with backslashes → forward slashes so Windows paths
+            # pasted with raw backslashes don't break TOML parsing.
+            raw = toml.loads(text.replace("\\", "/"))
         conv = cattrs.GenConverter(forbid_extra_keys=True)
         return conv.structure(raw, Config)
     raise RuntimeError("could not find configuration file")

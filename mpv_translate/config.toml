@@ -66,7 +66,7 @@ seek_chunk_duration = 9.0
 # After seeking, MPV pauses and waits up to this many seconds for the first subtitle
 # to appear before resuming playback automatically.
 # Increase if subtitles often arrive after the dialogue has already passed.
-max_wait = 6.0
+max_wait = 0
 
 # Subtitle gap fill: when the silence between two consecutive segments is shorter than this,
 # extend the first segment's end to the next segment's start (seconds).
@@ -84,6 +84,10 @@ word_end_padding = 1.0
 # Filter out common Whisper hallucination phrases ("Thanks for watching!", etc.).
 # Set to false only if you're seeing real speech being incorrectly suppressed.
 suppress_hallucinations = true
+
+# Maximum seconds audio translation may lead playback before pausing (0 = unlimited).
+# Increase to let Whisper buffer further ahead; set to 0 to never throttle.
+max_lead = 0
 
 # Word-detection pre-filter: a small Whisper model checks if actual words are spoken
 # before running the expensive main model. Saves GPU time on silent/music-only chunks.
@@ -132,7 +136,7 @@ interval = 1.0
 max_chars = 120
 
 # Minimum easyocr recognition confidence (0.0–1.0).
-min_confidence = 0.5
+min_confidence = 0.8
 
 # Drop detected text blocks shorter than this many characters.
 # Filters single-character noise (stray digits, punctuation) that fragment into "1 0 0 5"-style garbage.
@@ -205,3 +209,9 @@ min_display_seconds = 3.0
 # Suppress re-showing identical text within this many seconds.
 # Prevents title cards that fade in/out from being displayed twice.
 cooldown_seconds = 30.0
+
+# Maximum vertical lines for the OCR overlay before merging onto fewer rows.
+# When the overlay has more lines than this, extra lines are joined side-by-side
+# with " | " separators so the text spreads horizontally instead of overflowing
+# the screen vertically.  0 = unlimited (no redistribution).
+max_lines = 3

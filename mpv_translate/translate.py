@@ -288,25 +288,34 @@ def _seg_end(s: Any, padding: float = 0.0) -> float:
 
 # Phrases that Whisper commonly hallucinates when audio is silent or music-only.
 # Matched case-insensitively against the last line of a subtitle (the English translation).
+# Patterns use \b.* at the end to swallow trailing fluff ("to the end", "this video", etc.)
+# so the hallucination is caught regardless of how Whisper finishes the sentence.
 _HALLUCINATION_RE = re.compile(
     r"^\s*(?:"
     # YouTube-style calls to action
-    r"thank(?:s| you) for (?:watching|viewing|listening)"
-    r"|please (?:like|subscribe|share|comment)"
-    r"|(?:like|subscribe)(?:,? and|,) (?:subscribe|like|share|comment|the channel)"
-    r"|don'?t forget to (?:like|subscribe|share)"
-    r"|see you (?:in the next|next time|next video|soon)"
-    r"|(?:check out|watch) (?:my|the|our) (?:other )?(?:videos?|channel|content)"
-    r"|(?:hit|smash|click) the (?:like|subscribe|notification|bell) button"
-    r"|subscribe(?: for more)?"
-    r"|follow (?:us|me) on (?:twitter|x|instagram|facebook|tiktok|youtube)"
-    r"|support (?:us|me) on patreon"
-    r"|(?:this (?:video|episode|content) (?:is |was )?)?(?:sponsored|brought to you) by"
+    r"thank(?:s| you)(?: (?:so|very) much)? for (?:watching|viewing|listening)\b.*"
+    r"|please (?:like|subscribe|share|comment)\b.*"
+    r"|(?:like|subscribe)(?:,? and|,) (?:subscribe|like|share|comment|the channel)\b.*"
+    r"|don'?t forget to (?:like|subscribe|share)\b.*"
+    r"|be sure to (?:like|subscribe|share|comment|check out)\b.*"
+    r"|if you (?:enjoyed?|liked?) (?:this|the) (?:video|episode|content)\b.*"
+    r"|i hope you (?:enjoyed?|liked?)\b.*"
+    r"|see you (?:in the next|next time|next video|later|soon)\b.*"
+    r"|(?:check out|watch) (?:my|the|our) (?:other )?(?:videos?|channel|content)\b.*"
+    r"|(?:hit|smash|click) (?:the )?(?:like|subscribe|notification|bell)\b.*"
+    r"|subscribe(?: (?:for more|to (?:the|my|our) channel))?\s*[.!?♪❤]*\s*$"
+    r"|follow (?:us|me) on (?:twitter|x|instagram|facebook|tiktok|youtube)\b.*"
+    r"|support (?:us|me) on patreon\b.*"
+    r"|(?:this (?:video|episode|content) (?:is |was )?)?(?:sponsored|brought to you) by\b.*"
+    r"|(?:leave|drop) (?:a )?(?:like|comment|your (?:thoughts|feedback))\b.*"
+    r"|let (?:us|me) know (?:what you think|in the comments)\b.*"
     # Subtitle/transcript credits (Amara.org and similar — very common Whisper hallucination)
-    r"|amara\.?org"
-    r"|(?:sub(?:title|caption)s?|captions?) (?:(?:created |made |edited )?by|from)(?: the)? amara"
-    r"|(?:transcript(?:ion)?|transcribed|translated|captioned|subtitled) by"
-    r")\s*[.!?♪❤]*\s*$",
+    r"|amara\.?org\b.*"
+    r"|(?:sub(?:title|caption)s?|captions?) (?:(?:created |made |edited )?by|from)(?: the)? amara\b.*"
+    r"|(?:transcript(?:ion)?|transcribed|translated|captioned|subtitled) by\b.*"
+    # Music-only phantoms (nothing but music symbols / whitespace)
+    r"|[♪♫🎵🎶\s]+"
+    r")\s*[.!?♪❤🙏]*\s*$",
     re.IGNORECASE,
 )
 

@@ -64,7 +64,11 @@ class MPVMonitor:
         )
 
         # OCR overlay + loop (enabled via config.ocr.enabled)
-        self._ocr_overlay = PushOverlay(self.command, margin_top=self.config.ocr.margin_top)
+        self._ocr_overlay = PushOverlay(
+            self.command,
+            margin_top=self.config.ocr.margin_top,
+            max_lines=self.config.ocr.max_lines,
+        )
         self._ocr_loop: Optional[OcrLoop] = (
             OcrLoop(self.command, self.config, self._ocr_overlay,
                     gpu_scheduler=self._gpu_scheduler)
@@ -79,6 +83,7 @@ class MPVMonitor:
         self._seek_timer: Optional[threading.Timer] = None
         self._seek_lock = threading.Lock()
         self._seek_debounce = 0.075  # seconds to wait after last seek before launching
+        self._translated_up_to: float = 0.0  # furthest translated position (seconds)
 
         self._register()
         self._launch_if_already_playing()
@@ -137,6 +142,7 @@ class MPVMonitor:
         else:
             self.command("show-text", "mpv-translate: OFF")
             self._overlay.clear()
+            self._translated_up_to = 0.0
             self._stop()
 
     def _on_start_file(self, _event: Any = None):
@@ -145,6 +151,7 @@ class MPVMonitor:
         self._overlay.clear()
         self._paused_by_seek = False
         self._ocr_seek_in_progress = False
+        self._translated_up_to = 0.0
 
         if self._ocr_loop:
             self._ocr_loop.stop()
@@ -169,7 +176,8 @@ class MPVMonitor:
             ocr_first_ready = Event()
 
         # Pause MPV so we can wait for the first translations before playback starts.
-        if not was_paused and (first_ready is not None or ocr_first_ready is not None):
+        max_wait = self.config.translate.max_wait
+        if max_wait > 0 and not was_paused and (first_ready is not None or ocr_first_ready is not None):
             self._ocr_seek_in_progress = True  # prevent _on_pause_change from stopping OCR
             try:
                 self.command("set_property", "pause", True)
@@ -221,13 +229,48 @@ class MPVMonitor:
             self._seek_timer.start()
 
     def _do_seek(self):
-        """Actually restart translation after the debounce window closes."""
+        """Actually restart translation after the debounce window closes.
+
+        Two modes:
+          • **backward seek** (into already-translated region): the overlay already
+            has segments for this position, so we skip pausing MPV and resume
+            translation from the frontier (_translated_up_to).
+          • **forward seek** (past the frontier): pause MPV, wait for the first
+            subtitle from the new position, then resume.
+        """
 
         try:
             position = float(self.command("get_property", "time-pos") or 0.0)
         except (MPVError, TypeError):
             position = 0.0
 
+        # ── backward seek into already-translated region ────────────────────
+        # The overlay already has segments covering this position — no need to
+        # re-translate or pause MPV.  Resume from the frontier.
+        if self._translated_up_to > 0 and position < self._translated_up_to:
+            log.info(
+                "seek to %.2fs (translated up to %.2fs) — resuming from frontier",
+                position, self._translated_up_to,
+            )
+            # If a previous seek paused MPV for us, resume now — we have content.
+            if self._paused_by_seek:
+                try:
+                    self.command("set_property", "pause", False)
+                except MPVError:
+                    pass
+                self._paused_by_seek = False
+
+            if self._ocr_loop:
+                self._ocr_loop.stop()
+                self._ocr_loop.start()
+
+            self._launch(
+                position=self._translated_up_to,
+                translated_up_to=self._translated_up_to,
+            )
+            return
+
+        # ── forward seek (past the translated frontier) ─────────────────────
         try:
             was_paused = bool(self.command("get_property", "pause"))
         except (MPVError, TypeError):
@@ -236,10 +279,12 @@ class MPVMonitor:
         log.info("seek to %.2fs — launching new job", position)
 
         # Create a resume mechanism if MPV is playing, OR if a previous seek already
-        # paused it for us (_paused_by_seek).  Skip only when the user paused manually.
+        # paused it for us (_paused_by_seek).  Skip only when the user paused manually
+        # or when max_wait is 0 (user opted out of pause-on-seek).
+        max_wait = self.config.translate.max_wait
         first_ready: Optional[Event] = None
         ocr_first_ready: Optional[Event] = None
-        if not was_paused or self._paused_by_seek:
+        if max_wait > 0 and (not was_paused or self._paused_by_seek):
             first_ready = Event()
             if self._ocr_loop:
                 ocr_first_ready = Event()
@@ -262,7 +307,11 @@ class MPVMonitor:
             self._ocr_loop.stop()
             self._ocr_loop.start(first_ready=ocr_first_ready)
 
-        cancel = self._launch(position=position, first_ready=first_ready)
+        cancel = self._launch(
+            position=position,
+            first_ready=first_ready,
+            translated_up_to=self._translated_up_to,
+        )
 
         if first_ready is not None and cancel is not None:
             max_wait = self.config.translate.max_wait
@@ -301,6 +350,7 @@ class MPVMonitor:
         self,
         position: Optional[float] = None,
         first_ready: Optional[Event] = None,
+        translated_up_to: float = 0.0,
     ) -> Optional[Event]:
         """Start a new translation job and return its cancel Event, or None on failure."""
         if not self.enabled:
@@ -326,7 +376,8 @@ class MPVMonitor:
 
         log.info("launching translation job: path=%s position=%.2f", path, position)
         self._pool.submit(
-            self._run_job, path=path, position=position, cancel=cancel, first_ready=first_ready
+            self._run_job, path=path, position=position, cancel=cancel,
+            first_ready=first_ready, translated_up_to=translated_up_to,
         )
         return cancel
 
@@ -367,24 +418,31 @@ class MPVMonitor:
     def _get_playback_pos(self) -> float:
         return float(self.command("get_property", "time-pos") or 0.0)
 
-    def _run_job(self, *, path: str, position: float, cancel: Event, first_ready: Optional[Event] = None):
+    def _run_job(self, *, path: str, position: float, cancel: Event,
+                 first_ready: Optional[Event] = None, translated_up_to: float = 0.0):
         try:
             for item in core_loop(
                 path=path, position=position, cancel=cancel,
                 first_ready=first_ready, get_playback_pos=self._get_playback_pos,
                 gpu_scheduler=self._gpu_scheduler,
+                translated_up_to=translated_up_to,
             ):
                 if cancel.is_set():
                     break
 
                 if isinstance(item, SRTFile):
-                    # New job starting: clear any previous overlay content.
-                    self._overlay.clear()
+                    pass  # overlay is cleared on file-change, not per-job
                 elif item is True:
                     self.command("show-text", "mpv-translate: done")
                 elif isinstance(item, list):
                     # Chunk of (abs_start, abs_end, text) triples — hand to overlay.
                     self._overlay.add_segments(item)
+                    # Track the furthest point we've translated.
+                    if item:
+                        self._translated_up_to = max(
+                            self._translated_up_to,
+                            max(end for _, end, _ in item),
+                        )
 
         except Exception:
             log.exception("translation job failed for %s", path)

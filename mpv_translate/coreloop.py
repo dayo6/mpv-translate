@@ -91,6 +91,7 @@ def core_loop(
     first_ready: Optional[Event] = None,
     get_playback_pos: Optional[callable] = None,
     gpu_scheduler=None,
+    translated_up_to: float = 0.0,
 ) -> Generator[Union[SRTFile, list[tuple[float, float, str]], bool], None, None]:
     cancel = cancel or Event()
     config = get_config()
@@ -114,7 +115,7 @@ def core_loop(
     max_duration = config.translate.seek_chunk_duration if _seek_start else config.translate.chunk_duration
     recent_durations: deque[float] = deque(maxlen=config.translate.adaptive_history)
     lang = language or config.translate.language or None
-    last_abs_end: float = 0.0  # suppress chunk-boundary duplicates
+    last_abs_end: float = translated_up_to  # suppress already-translated & chunk-boundary duplicates
 
     reader = AudioReader(path)
     prefetch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch")

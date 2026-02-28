@@ -25,6 +25,25 @@ _OSD_RES_X = 1280
 _OSD_RES_Y = 720
 
 
+def _redistribute_lines(text: str, max_lines: int) -> str:
+    """If *text* has more than *max_lines* newline-separated lines, merge
+    adjacent lines onto the same row (joined by ``  |  ``) so the total
+    number of rows does not exceed *max_lines*.
+
+    When *max_lines* is 0 or the text already fits, returns *text* unchanged.
+    """
+    if max_lines <= 0:
+        return text
+    lines = text.split("\n")
+    if len(lines) <= max_lines:
+        return text
+    # Distribute lines as evenly as possible across max_lines rows.
+    rows: list[list[str]] = [[] for _ in range(max_lines)]
+    for i, line in enumerate(lines):
+        rows[i % max_lines].append(line)
+    return "\n".join("  |  ".join(parts) for parts in rows)
+
+
 def _ass_top_event(text: str, margin_top: int = 30) -> str:
     """Format text for top-centre osd-overlay placement.
     \\an8 = top-centre; \\pos(x, y) places it margin_top virtual pixels below the top edge.
@@ -128,9 +147,10 @@ class PushOverlay:
     (observed with osd-overlay ID != 1 on some MPV builds).
     """
 
-    def __init__(self, command: Callable, margin_top: int = 30):
+    def __init__(self, command: Callable, margin_top: int = 30, max_lines: int = 0):
         self._cmd = command
         self._margin_top = margin_top
+        self._max_lines = max_lines
         self._current: Optional[str] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -161,6 +181,8 @@ class PushOverlay:
     # ── internals ────────────────────────────────────────────────────────────
 
     def _push(self, text: str):
+        if text and self._max_lines > 0:
+            text = _redistribute_lines(text, self._max_lines)
         data = _ass_top_event(text, self._margin_top) if text else ""
         try:
             self._cmd(
