@@ -738,7 +738,12 @@ class OcrLoop:
         scans consecutive windows up to the audio frontier, queues results,
         releases GPU priority, then displays at playback time.
         """
-        scan_pos: float = 0.0
+        # Start from the current playback position so catch-up only covers
+        # the gap between here and the audio frontier, not the entire video.
+        try:
+            scan_pos = max(0.0, float(self._cmd("get_property", "time-pos") or 0.0))
+        except Exception:
+            scan_pos = 0.0
         pending: list[tuple[float, str, str]] = []
 
         while not self._stop.is_set():
@@ -843,10 +848,10 @@ class OcrLoop:
             # Pre-scan for watermarks before the first tick.
             if self._cfg.watermark_frames > 0:
                 self._scan_watermarks(tmpfile)
-            if self._cfg.lookahead_seconds > 0:
-                self._loop_scan(tmpfile)
-            elif self._cfg.binary_refine:
+            if self._cfg.binary_refine:
                 self._loop_poll_refine(tmpfile)
+            elif self._cfg.lookahead_seconds > 0:
+                self._loop_scan(tmpfile)
             else:
                 while not self._stop.wait(self._sched.next_interval()):
                     try:
@@ -864,21 +869,25 @@ class OcrLoop:
     def _loop_poll_refine(self, tmpfile: str):
         """Poll at regular intervals; binary-search text boundaries on transitions.
 
-        Every ``interval`` seconds, capture a frame and do lightweight detection.
-        When the text state changes (appears / disappears / changes), binary-
-        search between the previous and current check timestamps (via
-        ``capture_frame_av``) to find the precise transition, then run full OCR
-        and translate only at that point.
+        Every ``interval`` seconds, capture a frame and run lightweight CRAFT
+        detection only (no recognition).  When the text-region state changes
+        (regions appear / disappear / shift), binary-search between the
+        previous and current timestamps to find the precise transition, then
+        run full OCR + translate only at that point.
+
+        Recognition and translation happen *only* at transition points, so
+        each tick costs ~100-200 ms (CRAFT detection) instead of ~300 ms+
+        (CRAFT + recognition).
         """
         from .ocr import capture_frame_av, capture_screenshot  # noqa: PLC0415
-        from .ocr import detect_regions, recognize_region       # noqa: PLC0415
+        from .ocr import detect_regions                         # noqa: PLC0415
         from .ocr_translate import translate_text                # noqa: PLC0415
 
         prev_ts: float = 0.0       # video timestamp of previous poll
         prev_had_text: bool = False
-        prev_text: str = ""
-        prev_regions: list = []
-        prev_crops: list = []
+        prev_text: str = ""        # last OCR'd text (set at transitions)
+        prev_regions: list = []    # bboxes from previous detection
+        prev_crops: list = []      # region crops from previous detection
         prev_thumb = None
 
         while not self._stop.wait(self._cfg.interval):
@@ -901,7 +910,7 @@ class OcrLoop:
                 self._check_display_expiry()
                 continue
 
-            # 4. Detect text regions (CRAFT).
+            # 4. Detection only (CRAFT) — no recognition.  ~100-200 ms.
             with (self._gpu.gpu(self._stop, defer_to_audio=True)
                   if self._gpu else nullcontext(True)) as acquired:
                 if not acquired:
@@ -910,39 +919,36 @@ class OcrLoop:
                     tmpfile, self._cfg,
                     exclude_bboxes=self._watermark_bboxes or None,
                 )
+
             if result is None:
                 has_text = False
-                combined = ""
-                cur_regions: list = []
-                cur_crops: list = []
+                cur_regions = []
+                cur_crops = []
             else:
                 img, bboxes = result
-                # Quick recognition pass.
-                blocks: list[tuple[str, tuple]] = []
-                with (self._gpu.gpu(self._stop, defer_to_audio=True)
-                      if self._gpu else nullcontext(True)) as acquired:
-                    if not acquired:
-                        continue
-                    for bbox in bboxes:
-                        text = recognize_region(img, bbox, self._cfg)
-                        if (text
-                                and len(text) <= self._cfg.max_chars
-                                and text not in self._watermarks):
-                            blocks.append((text, bbox))
-                combined = "\n".join(t for t, _ in blocks)
-                if len(combined) > self._cfg.max_chars:
-                    combined = ""
-                    blocks = []
-                has_text = bool(combined)
-                cur_regions = [bbox for _, bbox in blocks]
+                has_text = bool(bboxes)
+                cur_regions = list(bboxes)
                 cur_crops = (self._region_crops(img, cur_regions)
                              if cur_regions else [])
 
             cur_thumb = self._prev_thumb  # set by _frame_changed
 
-            # 5. Compare against previous state and act on transitions.
+            # 5. Detect state transition by comparing region crops.
+            regions_changed = False
+            if has_text and prev_had_text:
+                # Both have text — check if region content changed.
+                if len(cur_crops) != len(prev_crops):
+                    regions_changed = True
+                else:
+                    import numpy as np  # noqa: PLC0415
+                    for c, p in zip(cur_crops, prev_crops):
+                        if float(np.mean(np.abs(c - p))) > 8.0:
+                            regions_changed = True
+                            break
+
+            # 6. Act on transitions.
             if has_text and not prev_had_text:
-                # ── Text appeared: binary search for start ────────────────
+                # ── Text appeared ─────────────────────────────────────────
                 if prev_ts > 0 and pos - prev_ts > 0.5:
                     start_ts = self._bisect(
                         path, prev_ts, pos,
@@ -951,54 +957,50 @@ class OcrLoop:
                 else:
                     start_ts = pos
 
-                # Full OCR at transition point.
+                # Full OCR + translate at transition.
                 with (self._gpu.gpu(self._stop, defer_to_audio=True)
                       if self._gpu else nullcontext(True)) as acquired:
                     if not acquired:
                         continue
-                    refined_text, refined_regions, refined_crops = \
-                        self._ocr_at(path, start_ts, tmpfile)
+                    text, _, _ = self._ocr_at(path, start_ts, tmpfile)
 
-                if not refined_text:
-                    refined_text = combined
+                if not text:
+                    # Retry at current pos if bisect landed on an edge.
+                    with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                          if self._gpu else nullcontext(True)) as acquired:
+                        if not acquired:
+                            continue
+                        text, _, _ = self._ocr_at(path, pos, tmpfile)
 
-                with (self._gpu.gpu(self._stop, defer_to_audio=True)
-                      if self._gpu else nullcontext(True)) as acquired:
-                    if not acquired:
-                        continue
-                    translation = translate_text(
-                        refined_text,
-                        self._cfg.source_lang,
-                        self._cfg.target_lang,
+                if text:
+                    with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                          if self._gpu else nullcontext(True)) as acquired:
+                        if not acquired:
+                            continue
+                        translation = translate_text(
+                            text, self._cfg.source_lang, self._cfg.target_lang,
+                        )
+                    log.info(
+                        "poll-refine: text appeared at %.1fs "
+                        "(polled %.1f→%.1f), %r -> %r",
+                        start_ts, prev_ts, pos, text, translation,
                     )
-
-                log.info(
-                    "poll-refine: text appeared at %.1fs (polled %.1f→%.1f), "
-                    "%r -> %r",
-                    start_ts, prev_ts, pos, refined_text, translation,
-                )
-                self._show_entry(refined_text, translation)
+                    self._show_entry(text, translation)
+                    prev_text = text
                 self._notify_ready()
 
             elif not has_text and prev_had_text:
-                # ── Text disappeared: binary search for end ───────────────
-                if prev_ts > 0 and pos - prev_ts > 0.5:
-                    end_ts = self._bisect(
-                        path, prev_ts, pos,
-                        prev_regions, prev_crops, prev_thumb, tmpfile,
-                    )
-                else:
-                    end_ts = pos
-
+                # ── Text disappeared ──────────────────────────────────────
                 log.info(
-                    "poll-refine: text disappeared at %.1fs (polled %.1f→%.1f)",
-                    end_ts, prev_ts, pos,
+                    "poll-refine: text disappeared (polled %.1f→%.1f)",
+                    prev_ts, pos,
                 )
                 self._show_entry("", "")
+                prev_text = ""
                 self._notify_ready()
 
-            elif has_text and prev_had_text and combined != prev_text:
-                # ── Text changed: binary search for transition ────────────
+            elif has_text and prev_had_text and regions_changed:
+                # ── Text content changed ──────────────────────────────────
                 if prev_ts > 0 and pos - prev_ts > 0.5:
                     change_ts = self._bisect(
                         path, prev_ts, pos,
@@ -1011,28 +1013,30 @@ class OcrLoop:
                       if self._gpu else nullcontext(True)) as acquired:
                     if not acquired:
                         continue
-                    refined_text, refined_regions, refined_crops = \
-                        self._ocr_at(path, change_ts, tmpfile)
+                    text, _, _ = self._ocr_at(path, change_ts, tmpfile)
 
-                if not refined_text:
-                    refined_text = combined
+                if not text:
+                    with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                          if self._gpu else nullcontext(True)) as acquired:
+                        if not acquired:
+                            continue
+                        text, _, _ = self._ocr_at(path, pos, tmpfile)
 
-                with (self._gpu.gpu(self._stop, defer_to_audio=True)
-                      if self._gpu else nullcontext(True)) as acquired:
-                    if not acquired:
-                        continue
-                    translation = translate_text(
-                        refined_text,
-                        self._cfg.source_lang,
-                        self._cfg.target_lang,
+                if text and text != prev_text:
+                    with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                          if self._gpu else nullcontext(True)) as acquired:
+                        if not acquired:
+                            continue
+                        translation = translate_text(
+                            text, self._cfg.source_lang, self._cfg.target_lang,
+                        )
+                    log.info(
+                        "poll-refine: text changed at %.1fs "
+                        "(polled %.1f→%.1f), %r -> %r",
+                        change_ts, prev_ts, pos, text, translation,
                     )
-
-                log.info(
-                    "poll-refine: text changed at %.1fs (polled %.1f→%.1f), "
-                    "%r -> %r",
-                    change_ts, prev_ts, pos, refined_text, translation,
-                )
-                self._show_entry(refined_text, translation)
+                    self._show_entry(text, translation)
+                    prev_text = text
                 self._notify_ready()
 
             else:
@@ -1040,10 +1044,9 @@ class OcrLoop:
                 self._check_display_expiry()
                 self._notify_ready()
 
-            # 6. Update state for next poll.
+            # 7. Update state for next poll.
             prev_ts = pos
             prev_had_text = has_text
-            prev_text = combined
             prev_regions = cur_regions
             prev_crops = cur_crops
             prev_thumb = cur_thumb
