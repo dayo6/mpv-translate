@@ -262,6 +262,10 @@ def core_loop(
 
             yield written  # list of (abs_start, abs_end, text) as written to the SRT
 
+            # Hand GPU to OCR so it can catch up to where audio has translated.
+            if gpu_scheduler is not None:
+                gpu_scheduler.yield_to_ocr(current_pos)
+
     finally:
         if prefetch_future is not None:
             prefetch_future.cancel()

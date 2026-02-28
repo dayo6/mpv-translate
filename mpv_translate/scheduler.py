@@ -27,6 +27,7 @@ class GpuScheduler:
         self._yield_sec = yield_ms / 1000.0
         self._ocr_priority = threading.Event()
         self._priority_set_at: float = 0.0
+        self._audio_frontier: float = 0.0
 
     def set_ocr_priority(self):
         """Give OCR first access to the GPU.
@@ -41,6 +42,21 @@ class GpuScheduler:
     def clear_ocr_priority(self):
         """Resume fair scheduling between audio and OCR."""
         self._ocr_priority.clear()
+
+    def yield_to_ocr(self, frontier: float):
+        """Called by audio after each chunk to hand GPU time to OCR.
+
+        Sets the audio frontier (the timestamp audio has translated up to)
+        and activates OCR priority so the next audio ``gpu(defer_to_ocr=True)``
+        blocks until OCR catches up and calls :meth:`clear_ocr_priority`.
+        """
+        self._audio_frontier = frontier
+        self.set_ocr_priority()
+
+    @property
+    def audio_frontier(self) -> float:
+        """Timestamp (seconds) that audio has translated up to."""
+        return self._audio_frontier
 
     @contextmanager
     def gpu(self, cancel: Optional[threading.Event] = None, defer_to_ocr: bool = False):
@@ -59,8 +75,8 @@ class GpuScheduler:
                 if cancel is not None and cancel.is_set():
                     yield False
                     return
-                # Safety timeout: auto-clear after 10 s.
-                if time.monotonic() - self._priority_set_at > 10.0:
+                # Safety timeout: auto-clear after 60 s.
+                if time.monotonic() - self._priority_set_at > 60.0:
                     log.debug("OCR priority safety timeout — clearing")
                     self._ocr_priority.clear()
                     break

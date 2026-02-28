@@ -689,9 +689,110 @@ class OcrLoop:
             if self._stop.wait(wait):
                 return
 
+    def _show_entry(self, raw: str, translation: str) -> None:
+        """Display or hide an OCR entry, handling cooldown/expiry/min-duration."""
+        if raw:
+            if self._cfg.cooldown_seconds > 0:
+                st = self._recently_shown.get(raw)
+                if st and time.monotonic() - st < self._cfg.cooldown_seconds:
+                    return
+            if raw in self._expired:
+                return
+            if raw == self._last_shown_raw:
+                return
+
+            log.info("OCR translation: %r -> %r", raw, translation)
+            self._overlay.show(translation)
+            self._last_shown_raw = raw
+            self._shown_at = time.monotonic()
+            self._recently_shown[raw] = time.monotonic()
+        else:
+            # Text disappeared.
+            if self._last_shown_raw:
+                min_d = self._cfg.min_display_seconds
+                if (min_d > 0 and self._shown_at is not None
+                        and time.monotonic() - self._shown_at < min_d):
+                    return  # keep showing until minimum duration
+                self._expired.discard(self._last_shown_raw)
+            self._overlay.hide()
+            self._last_shown_raw = ""
+            self._shown_at = None
+
+    def _check_display_expiry(self) -> None:
+        """Hide the overlay if the current text has been shown too long."""
+        if (self._last_shown_raw
+                and self._cfg.max_display_seconds > 0
+                and self._shown_at is not None
+                and time.monotonic() - self._shown_at
+                >= self._cfg.max_display_seconds):
+            self._overlay.hide()
+            self._expired.add(self._last_shown_raw)
+            self._last_shown_raw = ""
+            self._shown_at = None
+
     def _loop_scan(self, tmpfile: str):
-        """Main loop for lookahead mode: binary-search scan → display → repeat."""
+        """Main loop for lookahead mode: binary-search scan → display → repeat.
+
+        When interleaving with audio translation (gpu scheduler present),
+        operates in catch-up mode: after audio finishes a chunk, OCR batch-
+        scans consecutive windows up to the audio frontier, queues results,
+        releases GPU priority, then displays at playback time.
+        """
+        scan_pos: float = 0.0
+        pending: list[tuple[float, str, str]] = []
+
         while not self._stop.is_set():
+            # ── Phase A: Catch-up scan to audio frontier ─────────────────
+            if (self._gpu is not None
+                    and self._gpu._ocr_priority.is_set()
+                    and self._gpu.audio_frontier > scan_pos):
+
+                frontier = self._gpu.audio_frontier
+                try:
+                    path = str(self._cmd("get_property", "path") or "")
+                except Exception:
+                    path = ""
+
+                if path:
+                    log.debug(
+                        "OCR catch-up: scanning %.1f → %.1f",
+                        scan_pos, frontier,
+                    )
+                    while scan_pos < frontier and not self._stop.is_set():
+                        try:
+                            entries = self._scan_window(path, scan_pos, tmpfile)
+                        except Exception:
+                            log.warning("scan_window error in catch-up", exc_info=True)
+                            entries = []
+                        pending.extend(entries)
+                        scan_pos += self._cfg.lookahead_seconds
+
+                # Done catching up — let audio proceed with its next chunk.
+                self._gpu.clear_ocr_priority()
+                log.debug("OCR catch-up done, released priority")
+
+            # ── Phase B: Display queued entries from catch-up ─────────────
+            while pending and not self._stop.is_set():
+                # Interrupt display if audio yielded again (new catch-up needed).
+                if (self._gpu is not None
+                        and self._gpu._ocr_priority.is_set()
+                        and self._gpu.audio_frontier > scan_pos):
+                    break
+
+                video_ts, raw, translation = pending.pop(0)
+                self._wait_for_pos(video_ts)
+                if self._stop.is_set():
+                    break
+                self._show_entry(raw, translation)
+                self._notify_ready()
+
+            # If a new catch-up is needed, loop back to Phase A immediately.
+            if (self._gpu is not None
+                    and self._gpu._ocr_priority.is_set()
+                    and self._gpu.audio_frontier > scan_pos):
+                continue
+
+            # ── Phase C: Normal mode — single window at playback position ─
             try:
                 pos = float(self._cmd("get_property", "time-pos") or 0.0)
                 path = str(self._cmd("get_property", "path") or "")
@@ -705,22 +806,16 @@ class OcrLoop:
                     break
                 continue
 
-            # Check display duration expiry between scans.
-            if (self._last_shown_raw
-                    and self._cfg.max_display_seconds > 0
-                    and self._shown_at is not None
-                    and time.monotonic() - self._shown_at
-                    >= self._cfg.max_display_seconds):
-                self._overlay.hide()
-                self._expired.add(self._last_shown_raw)
-                self._last_shown_raw = ""
-                self._shown_at = None
+            scan_pos = pos
+            self._check_display_expiry()
 
             try:
                 entries = self._scan_window(path, pos, tmpfile)
             except Exception:
                 log.warning("scan_window error", exc_info=True)
                 entries = []
+
+            scan_pos = pos + self._cfg.lookahead_seconds
 
             if not entries:
                 self._notify_ready()
@@ -736,34 +831,7 @@ class OcrLoop:
                 if self._stop.is_set():
                     break
 
-                if raw:
-                    # Cooldown check.
-                    if self._cfg.cooldown_seconds > 0:
-                        st = self._recently_shown.get(raw)
-                        if st and time.monotonic() - st < self._cfg.cooldown_seconds:
-                            continue
-                    if raw in self._expired:
-                        continue
-                    if raw == self._last_shown_raw:
-                        continue
-
-                    log.info("OCR translation: %r -> %r", raw, translation)
-                    self._overlay.show(translation)
-                    self._last_shown_raw = raw
-                    self._shown_at = time.monotonic()
-                    self._recently_shown[raw] = time.monotonic()
-                else:
-                    # Text disappeared.
-                    if self._last_shown_raw:
-                        min_d = self._cfg.min_display_seconds
-                        if (min_d > 0 and self._shown_at is not None
-                                and time.monotonic() - self._shown_at < min_d):
-                            continue  # keep showing until minimum duration
-                        self._expired.discard(self._last_shown_raw)
-                    self._overlay.hide()
-                    self._last_shown_raw = ""
-                    self._shown_at = None
-
+                self._show_entry(raw, translation)
                 self._notify_ready()
 
     # ── tick-based polling mode (no lookahead) ────────────────────────────
