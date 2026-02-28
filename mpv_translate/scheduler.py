@@ -43,6 +43,11 @@ class GpuScheduler:
         """Resume fair scheduling between audio and OCR."""
         self._ocr_priority.clear()
 
+    def reset(self):
+        """Clear all priority/frontier state (e.g. on seek or file change)."""
+        self._ocr_priority.clear()
+        self._audio_frontier = 0.0
+
     def yield_to_ocr(self, frontier: float):
         """Called by audio after each chunk to hand GPU time to OCR.
 

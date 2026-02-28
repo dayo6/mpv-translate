@@ -154,6 +154,8 @@ class MPVMonitor:
         self._ocr_seek_in_progress = False
         self._translated_up_to = 0.0
 
+        if self._gpu_scheduler:
+            self._gpu_scheduler.reset()
         if self._ocr_loop:
             self._ocr_loop.stop()
 
@@ -244,6 +246,10 @@ class MPVMonitor:
           • **forward seek** (past the frontier): pause MPV, wait for the first
             subtitle from the new position, then resume.
         """
+
+        # Clear stale priority/frontier so audio goes first after a seek.
+        if self._gpu_scheduler:
+            self._gpu_scheduler.reset()
 
         try:
             position = float(self.command("get_property", "time-pos") or 0.0)
