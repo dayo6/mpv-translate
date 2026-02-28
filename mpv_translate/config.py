@@ -130,6 +130,10 @@ class OcrConfig:
     # Font size for the OCR overlay in the 1280×720 virtual OSD space.
     # Smaller = more lines fit on screen without being cut off.
     font_size: int = 24
+    # Poll at `interval` frequency; on text state change, binary-search for
+    # precise appearance/disappearance boundaries.
+    # Requires local video file (uses capture_frame_av).
+    binary_refine: bool = False
     # GPU scheduling when both audio translation and OCR are active.
     # "interleave" = take turns: audio chunk → OCR catch-up → repeat
     # "simultaneous" = both use GPU at the same time (no scheduling)

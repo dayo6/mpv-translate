@@ -845,6 +845,8 @@ class OcrLoop:
                 self._scan_watermarks(tmpfile)
             if self._cfg.lookahead_seconds > 0:
                 self._loop_scan(tmpfile)
+            elif self._cfg.binary_refine:
+                self._loop_poll_refine(tmpfile)
             else:
                 while not self._stop.wait(self._sched.next_interval()):
                     try:
@@ -856,6 +858,197 @@ class OcrLoop:
                 os.unlink(tmpfile)
             except OSError:
                 pass
+
+    # ── poll-and-refine mode (binary search on transitions) ──────────────
+
+    def _loop_poll_refine(self, tmpfile: str):
+        """Poll at regular intervals; binary-search text boundaries on transitions.
+
+        Every ``interval`` seconds, capture a frame and do lightweight detection.
+        When the text state changes (appears / disappears / changes), binary-
+        search between the previous and current check timestamps (via
+        ``capture_frame_av``) to find the precise transition, then run full OCR
+        and translate only at that point.
+        """
+        from .ocr import capture_frame_av, capture_screenshot  # noqa: PLC0415
+        from .ocr import detect_regions, recognize_region       # noqa: PLC0415
+        from .ocr_translate import translate_text                # noqa: PLC0415
+
+        prev_ts: float = 0.0       # video timestamp of previous poll
+        prev_had_text: bool = False
+        prev_text: str = ""
+        prev_regions: list = []
+        prev_crops: list = []
+        prev_thumb = None
+
+        while not self._stop.wait(self._cfg.interval):
+            # 1. Current position and path.
+            try:
+                pos = float(self._cmd("get_property", "time-pos") or 0.0)
+                path = str(self._cmd("get_property", "path") or "")
+            except Exception:
+                continue
+            if not path:
+                continue
+
+            # 2. Capture frame at current position.
+            if not capture_frame_av(path, pos, tmpfile):
+                if not capture_screenshot(self._cmd, tmpfile):
+                    continue
+
+            # 3. Thumbnail diff gate — skip when the frame is unchanged.
+            if not self._frame_changed(tmpfile):
+                self._check_display_expiry()
+                continue
+
+            # 4. Detect text regions (CRAFT).
+            with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                  if self._gpu else nullcontext(True)) as acquired:
+                if not acquired:
+                    continue
+                result = detect_regions(
+                    tmpfile, self._cfg,
+                    exclude_bboxes=self._watermark_bboxes or None,
+                )
+            if result is None:
+                has_text = False
+                combined = ""
+                cur_regions: list = []
+                cur_crops: list = []
+            else:
+                img, bboxes = result
+                # Quick recognition pass.
+                blocks: list[tuple[str, tuple]] = []
+                with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                      if self._gpu else nullcontext(True)) as acquired:
+                    if not acquired:
+                        continue
+                    for bbox in bboxes:
+                        text = recognize_region(img, bbox, self._cfg)
+                        if (text
+                                and len(text) <= self._cfg.max_chars
+                                and text not in self._watermarks):
+                            blocks.append((text, bbox))
+                combined = "\n".join(t for t, _ in blocks)
+                if len(combined) > self._cfg.max_chars:
+                    combined = ""
+                    blocks = []
+                has_text = bool(combined)
+                cur_regions = [bbox for _, bbox in blocks]
+                cur_crops = (self._region_crops(img, cur_regions)
+                             if cur_regions else [])
+
+            cur_thumb = self._prev_thumb  # set by _frame_changed
+
+            # 5. Compare against previous state and act on transitions.
+            if has_text and not prev_had_text:
+                # ── Text appeared: binary search for start ────────────────
+                if prev_ts > 0 and pos - prev_ts > 0.5:
+                    start_ts = self._bisect(
+                        path, prev_ts, pos,
+                        [], [], prev_thumb, tmpfile,
+                    )
+                else:
+                    start_ts = pos
+
+                # Full OCR at transition point.
+                with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                      if self._gpu else nullcontext(True)) as acquired:
+                    if not acquired:
+                        continue
+                    refined_text, refined_regions, refined_crops = \
+                        self._ocr_at(path, start_ts, tmpfile)
+
+                if not refined_text:
+                    refined_text = combined
+
+                with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                      if self._gpu else nullcontext(True)) as acquired:
+                    if not acquired:
+                        continue
+                    translation = translate_text(
+                        refined_text,
+                        self._cfg.source_lang,
+                        self._cfg.target_lang,
+                    )
+
+                log.info(
+                    "poll-refine: text appeared at %.1fs (polled %.1f→%.1f), "
+                    "%r -> %r",
+                    start_ts, prev_ts, pos, refined_text, translation,
+                )
+                self._show_entry(refined_text, translation)
+                self._notify_ready()
+
+            elif not has_text and prev_had_text:
+                # ── Text disappeared: binary search for end ───────────────
+                if prev_ts > 0 and pos - prev_ts > 0.5:
+                    end_ts = self._bisect(
+                        path, prev_ts, pos,
+                        prev_regions, prev_crops, prev_thumb, tmpfile,
+                    )
+                else:
+                    end_ts = pos
+
+                log.info(
+                    "poll-refine: text disappeared at %.1fs (polled %.1f→%.1f)",
+                    end_ts, prev_ts, pos,
+                )
+                self._show_entry("", "")
+                self._notify_ready()
+
+            elif has_text and prev_had_text and combined != prev_text:
+                # ── Text changed: binary search for transition ────────────
+                if prev_ts > 0 and pos - prev_ts > 0.5:
+                    change_ts = self._bisect(
+                        path, prev_ts, pos,
+                        prev_regions, prev_crops, prev_thumb, tmpfile,
+                    )
+                else:
+                    change_ts = pos
+
+                with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                      if self._gpu else nullcontext(True)) as acquired:
+                    if not acquired:
+                        continue
+                    refined_text, refined_regions, refined_crops = \
+                        self._ocr_at(path, change_ts, tmpfile)
+
+                if not refined_text:
+                    refined_text = combined
+
+                with (self._gpu.gpu(self._stop, defer_to_audio=True)
+                      if self._gpu else nullcontext(True)) as acquired:
+                    if not acquired:
+                        continue
+                    translation = translate_text(
+                        refined_text,
+                        self._cfg.source_lang,
+                        self._cfg.target_lang,
+                    )
+
+                log.info(
+                    "poll-refine: text changed at %.1fs (polled %.1f→%.1f), "
+                    "%r -> %r",
+                    change_ts, prev_ts, pos, refined_text, translation,
+                )
+                self._show_entry(refined_text, translation)
+                self._notify_ready()
+
+            else:
+                # ── No transition — enforce display limits ────────────────
+                self._check_display_expiry()
+                self._notify_ready()
+
+            # 6. Update state for next poll.
+            prev_ts = pos
+            prev_had_text = has_text
+            prev_text = combined
+            prev_regions = cur_regions
+            prev_crops = cur_crops
+            prev_thumb = cur_thumb
+
+    # ── tick-based polling mode (no lookahead) ────────────────────────────
 
     def _tick(self, tmpfile: str):
         from .ocr import capture_frame_av, capture_screenshot  # noqa: PLC0415

@@ -231,4 +231,10 @@ font_size = 24
 #                Lower VRAM usage; audio gets priority after seek.
 # "simultaneous" = both pipelines use the GPU at the same time (no scheduling).
 #                  Higher throughput if you have enough VRAM.
+# Poll at `interval` frequency and binary-search for precise text
+# appearance/disappearance timestamps on state changes.
+# Only does full OCR at transitions — more efficient than full OCR every tick.
+# Requires local video file for arbitrary frame access.
+binary_refine = false
+
 gpu_mode = "interleave"
