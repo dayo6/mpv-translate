@@ -130,6 +130,10 @@ class OcrConfig:
     # Font size for the OCR overlay in the 1280×720 virtual OSD space.
     # Smaller = more lines fit on screen without being cut off.
     font_size: int = 24
+    # GPU scheduling when both audio translation and OCR are active.
+    # "interleave" = take turns: audio chunk → OCR catch-up → repeat
+    # "simultaneous" = both use GPU at the same time (no scheduling)
+    gpu_mode: str = "interleave"
 
 
 @dataclass(kw_only=True)

@@ -225,3 +225,10 @@ max_lines = 3
 # Smaller values keep multi-line translations from extending too far down the screen.
 # Default MPV subtitle font is ~48; 24 keeps 3 lines comfortably in the top area.
 font_size = 24
+
+# GPU scheduling when both audio translation and OCR are active.
+# "interleave" = take turns: audio processes one chunk, then OCR catches up, repeat.
+#                Lower VRAM usage; audio gets priority after seek.
+# "simultaneous" = both pipelines use the GPU at the same time (no scheduling).
+#                  Higher throughput if you have enough VRAM.
+gpu_mode = "interleave"

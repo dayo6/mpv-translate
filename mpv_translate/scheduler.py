@@ -15,9 +15,13 @@ class GpuScheduler:
     competing for GPU simultaneously.  When only one pipeline runs,
     the lock is uncontested and adds negligible overhead.
 
-    Supports an OCR-priority mode: while active, callers that pass
-    ``defer_to_ocr=True`` (audio translation) wait for OCR to finish
-    its first pass before competing for the lock.
+    Priority modes
+    ──────────────
+    • **OCR priority** — audio callers (``defer_to_ocr=True``) wait until
+      OCR finishes.  Used at file load (OCR scans first) and after each
+      audio chunk (OCR catches up to the audio frontier).
+    • **Audio priority** — OCR callers (``defer_to_audio=True``) wait until
+      audio finishes.  Used after seeks so the first subtitle appears fast.
     """
 
     def __init__(self, yield_ms: float = 5.0):
@@ -26,15 +30,17 @@ class GpuScheduler:
         self._waiter_lock = threading.Lock()
         self._yield_sec = yield_ms / 1000.0
         self._ocr_priority = threading.Event()
+        self._audio_priority = threading.Event()
         self._priority_set_at: float = 0.0
         self._audio_frontier: float = 0.0
+
+    # ── priority control ──────────────────────────────────────────────────
 
     def set_ocr_priority(self):
         """Give OCR first access to the GPU.
 
         Audio callers (``defer_to_ocr=True``) will wait until
-        :meth:`clear_ocr_priority` is called.  Auto-clears after 10 s
-        as a safety net.
+        :meth:`clear_ocr_priority` is called.
         """
         self._priority_set_at = time.monotonic()
         self._ocr_priority.set()
@@ -43,18 +49,32 @@ class GpuScheduler:
         """Resume fair scheduling between audio and OCR."""
         self._ocr_priority.clear()
 
+    def set_audio_priority(self):
+        """Give audio first access to the GPU.
+
+        OCR callers (``defer_to_audio=True``) will wait until
+        :meth:`clear_audio_priority` is called.
+        """
+        self._priority_set_at = time.monotonic()
+        self._audio_priority.set()
+
+    def clear_audio_priority(self):
+        self._audio_priority.clear()
+
     def reset(self):
         """Clear all priority/frontier state (e.g. on seek or file change)."""
         self._ocr_priority.clear()
+        self._audio_priority.clear()
         self._audio_frontier = 0.0
 
     def yield_to_ocr(self, frontier: float):
         """Called by audio after each chunk to hand GPU time to OCR.
 
-        Sets the audio frontier (the timestamp audio has translated up to)
+        Clears audio priority (audio's turn is over), sets the audio frontier,
         and activates OCR priority so the next audio ``gpu(defer_to_ocr=True)``
         blocks until OCR catches up and calls :meth:`clear_ocr_priority`.
         """
+        self._audio_priority.clear()
         self._audio_frontier = frontier
         self.set_ocr_priority()
 
@@ -63,27 +83,36 @@ class GpuScheduler:
         """Timestamp (seconds) that audio has translated up to."""
         return self._audio_frontier
 
+    # ── GPU acquisition ───────────────────────────────────────────────────
+
     @contextmanager
-    def gpu(self, cancel: Optional[threading.Event] = None, defer_to_ocr: bool = False):
+    def gpu(
+        self,
+        cancel: Optional[threading.Event] = None,
+        defer_to_ocr: bool = False,
+        defer_to_audio: bool = False,
+    ):
         """Acquire exclusive GPU access.
 
         Polls the lock every 100 ms, checking *cancel* between attempts.
         Yields ``True`` if acquired, ``False`` if cancelled first.
         On release, sleeps briefly when other callers are waiting (fairness).
-
-        When *defer_to_ocr* is True and OCR priority is active, waits for
-        the priority to clear (or 10 s safety timeout) before competing.
         """
-        # Defer to OCR when priority is active.
-        if defer_to_ocr:
-            while self._ocr_priority.is_set():
+        # Defer to the other pipeline when its priority is active.
+        for flag in (
+            (self._ocr_priority if defer_to_ocr else None),
+            (self._audio_priority if defer_to_audio else None),
+        ):
+            if flag is None:
+                continue
+            while flag.is_set():
                 if cancel is not None and cancel.is_set():
                     yield False
                     return
                 # Safety timeout: auto-clear after 60 s.
                 if time.monotonic() - self._priority_set_at > 60.0:
-                    log.debug("OCR priority safety timeout — clearing")
-                    self._ocr_priority.clear()
+                    log.debug("priority safety timeout — clearing")
+                    flag.clear()
                     break
                 time.sleep(0.1)
 

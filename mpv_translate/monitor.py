@@ -59,8 +59,11 @@ class MPVMonitor:
         self._overlay = OverlayManager(self.command, margin_bottom=self.config.subtitle.margin_bottom, font_size=self.config.subtitle.font_size)
 
         # GPU scheduler: coordinates GPU access between audio and OCR pipelines.
+        # Only used in "interleave" mode; "simultaneous" lets both run freely.
         self._gpu_scheduler: Optional[GpuScheduler] = (
-            GpuScheduler() if self.config.ocr.enabled else None
+            GpuScheduler()
+            if self.config.ocr.enabled and self.config.ocr.gpu_mode == "interleave"
+            else None
         )
 
         # OCR overlay + loop (enabled via config.ocr.enabled)
@@ -247,9 +250,10 @@ class MPVMonitor:
             subtitle from the new position, then resume.
         """
 
-        # Clear stale priority/frontier so audio goes first after a seek.
+        # Clear stale state and give audio first GPU access after a seek.
         if self._gpu_scheduler:
             self._gpu_scheduler.reset()
+            self._gpu_scheduler.set_audio_priority()
 
         try:
             position = float(self.command("get_property", "time-pos") or 0.0)

@@ -606,7 +606,7 @@ class OcrLoop:
             return []
 
         # Phase 2: full OCR at window start.
-        with (self._gpu.gpu(self._stop) if self._gpu else nullcontext(True)) as acquired:
+        with (self._gpu.gpu(self._stop, defer_to_audio=True) if self._gpu else nullcontext(True)) as acquired:
             if not acquired:
                 return []
             start_text, start_regions, start_crops = self._ocr_at(path, pos, tmpfile)
@@ -636,7 +636,7 @@ class OcrLoop:
             )
 
             # Full OCR at the transition.
-            with (self._gpu.gpu(self._stop) if self._gpu else nullcontext(True)) as acquired:
+            with (self._gpu.gpu(self._stop, defer_to_audio=True) if self._gpu else nullcontext(True)) as acquired:
                 if not acquired:
                     return []
                 new_text, new_regions, new_crops = self._ocr_at(
@@ -667,7 +667,7 @@ class OcrLoop:
         for text in unique:
             if self._stop.is_set():
                 return []
-            with (self._gpu.gpu(self._stop) if self._gpu else nullcontext(True)) as acquired:
+            with (self._gpu.gpu(self._stop, defer_to_audio=True) if self._gpu else nullcontext(True)) as acquired:
                 if not acquired:
                     return []
                 trans_map[text] = translate_text(
@@ -931,7 +931,7 @@ class OcrLoop:
 
         # 2. Detect text regions (easyocr CRAFT) or reuse previous bboxes.
         #    GPU scheduler: hold lock for detect + recognise, release before filtering.
-        with (self._gpu.gpu(self._stop) if self._gpu else nullcontext(True)) as acquired:
+        with (self._gpu.gpu(self._stop, defer_to_audio=True) if self._gpu else nullcontext(True)) as acquired:
             if not acquired:
                 return
             if reuse_regions:
@@ -1096,7 +1096,7 @@ class OcrLoop:
         # 8. Translate proactively — do the work during the lookahead window
         #    so the result is ready the instant the text reaches the screen.
         log.debug("stable text detected: %r", combined)
-        with (self._gpu.gpu(self._stop) if self._gpu else nullcontext(True)) as acquired:
+        with (self._gpu.gpu(self._stop, defer_to_audio=True) if self._gpu else nullcontext(True)) as acquired:
             if not acquired:
                 return
             translation = translate_text(combined, self._cfg.source_lang, self._cfg.target_lang)
