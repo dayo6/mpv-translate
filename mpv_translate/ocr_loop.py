@@ -230,6 +230,9 @@ class OcrLoop:
         if self._first_ready is not None:
             self._first_ready.set()
             self._first_ready = None
+            # Release GPU priority so audio translation can proceed.
+            if self._gpu is not None:
+                self._gpu.clear_ocr_priority()
 
     @staticmethod
     def _bboxes_overlap(a: tuple, b: tuple, tolerance: int = 50) -> bool:

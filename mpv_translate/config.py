@@ -127,6 +127,9 @@ class OcrConfig:
     # Lines beyond this limit are joined side-by-side with " | ".
     # 0 = unlimited (no redistribution).
     max_lines: int = 3
+    # Font size for the OCR overlay in the 1280×720 virtual OSD space.
+    # Smaller = more lines fit on screen without being cut off.
+    font_size: int = 24
 
 
 @dataclass(kw_only=True)
@@ -139,6 +142,9 @@ class SubtitleConfig:
     # Pixels from the bottom edge in a 1280×720 virtual space (proportionally scaled).
     # 0 = flush with the bottom; increase to raise subtitles higher.
     margin_bottom: int = 50
+    # Font size for the audio subtitle overlay in the 1280×720 virtual OSD space.
+    # 0 = use MPV's default (~48). Smaller values help with multi-line translations.
+    font_size: int = 0
 
     def get_subtitle(self, fname: str) -> pathlib.Path:
         if "://" in fname:

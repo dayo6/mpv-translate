@@ -44,36 +44,40 @@ def _redistribute_lines(text: str, max_lines: int) -> str:
     return "\n".join("  |  ".join(parts) for parts in rows)
 
 
-def _ass_top_event(text: str, margin_top: int = 30) -> str:
+def _ass_top_event(text: str, margin_top: int = 30, font_size: int = 0) -> str:
     """Format text for top-centre osd-overlay placement.
     \\an8 = top-centre; \\pos(x, y) places it margin_top virtual pixels below the top edge.
     """
     x = _OSD_RES_X // 2
     y = margin_top
-    return "{\\an8\\pos(%d,%d)}" % (x, y) + text.replace("\n", "\\N")
+    fs = "\\fs%d" % font_size if font_size > 0 else ""
+    return "{\\an8\\pos(%d,%d)%s}" % (x, y, fs) + text.replace("\n", "\\N")
 
 
-def _ass_event(text: str, margin_bottom: int = 50) -> str:
+def _ass_event(text: str, margin_bottom: int = 50, font_size: int = 0) -> str:
     """Format text for osd-overlay ass-events.
     \\an2 = bottom-center; \\pos(x, y) lifts the subtitle off the edge by margin_bottom
     virtual pixels (in the 1280×720 OSD space).
     """
     x = _OSD_RES_X // 2
     y = _OSD_RES_Y - margin_bottom
-    return "{\\an2\\pos(%d,%d)}" % (x, y) + text.replace("\n", "\\N")
+    fs = "\\fs%d" % font_size if font_size > 0 else ""
+    return "{\\an2\\pos(%d,%d)%s}" % (x, y, fs) + text.replace("\n", "\\N")
 
 
 class OverlayManager:
     """Drives a single MPV osd-overlay for subtitle display."""
 
-    def __init__(self, command: Callable, margin_bottom: int = 50):
+    def __init__(self, command: Callable, margin_bottom: int = 50, font_size: int = 0):
         """
         Args:
             command:       MPVMonitor.command — forwards calls to MPV JSON IPC.
             margin_bottom: Pixels from the bottom edge in the 1280×720 virtual OSD space.
+            font_size:     Font size in the 1280×720 virtual OSD space (0 = MPV default).
         """
         self._cmd = command
         self._margin_bottom = margin_bottom
+        self._font_size = font_size
         self._segments: List[Tuple[float, float, str]] = []
         self._starts: List[float] = []
         self._lock = threading.Lock()
@@ -121,7 +125,7 @@ class OverlayManager:
         if text == self._current_text:
             return
         self._current_text = text
-        data = _ass_event(text, self._margin_bottom) if text else ""
+        data = _ass_event(text, self._margin_bottom, self._font_size) if text else ""
         try:
             self._cmd("osd-overlay", _OVERLAY_ID, "ass-events", data, _OSD_RES_X, _OSD_RES_Y, 0, False, False)
         except Exception:
@@ -147,10 +151,11 @@ class PushOverlay:
     (observed with osd-overlay ID != 1 on some MPV builds).
     """
 
-    def __init__(self, command: Callable, margin_top: int = 30, max_lines: int = 0):
+    def __init__(self, command: Callable, margin_top: int = 30, max_lines: int = 0, font_size: int = 0):
         self._cmd = command
         self._margin_top = margin_top
         self._max_lines = max_lines
+        self._font_size = font_size
         self._current: Optional[str] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -183,7 +188,7 @@ class PushOverlay:
     def _push(self, text: str):
         if text and self._max_lines > 0:
             text = _redistribute_lines(text, self._max_lines)
-        data = _ass_top_event(text, self._margin_top) if text else ""
+        data = _ass_top_event(text, self._margin_top, self._font_size) if text else ""
         try:
             self._cmd(
                 "osd-overlay", _OCR_OVERLAY_ID, "ass-events",

@@ -97,7 +97,7 @@ gate_model = "tiny"
 
 [mpv]
 # Path to mpv executable — leave commented out if mpv is on PATH or in a standard location
-# executable = "C:/path/to/mpv.exe"
+executable = "C:/Users/danie/Downloads/mpv-x86_64-20251023-git-aa2dad0/mpv.exe"
 
 # Set to true to launch a new mpv instance on startup
 start_mpv = false
@@ -121,6 +121,10 @@ only_network = false
 # Vertical padding from the bottom edge in a 1280×720 virtual space (MPV scales to actual size).
 # 0 = flush with the bottom edge; increase to push subtitles higher up the screen.
 margin_bottom = 50
+
+# Font size for audio subtitles in the 1280×720 virtual OSD space.
+# 0 = use MPV's default (~48).
+font_size = 0
 
 
 [ocr]
@@ -215,3 +219,8 @@ cooldown_seconds = 30.0
 # with " | " separators so the text spreads horizontally instead of overflowing
 # the screen vertically.  0 = unlimited (no redistribution).
 max_lines = 3
+
+# Font size for the OCR overlay in the 1280×720 virtual OSD space.
+# Smaller values keep multi-line translations from extending too far down the screen.
+# Default MPV subtitle font is ~48; 24 keeps 3 lines comfortably in the top area.
+font_size = 24

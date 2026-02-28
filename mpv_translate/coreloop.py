@@ -171,7 +171,7 @@ def core_loop(
             t0 = time.time()
 
             # ── translate (offline via Whisper) ──────────────────────────────
-            with (gpu_scheduler.gpu(cancel) if gpu_scheduler else nullcontext(True)) as acquired:
+            with (gpu_scheduler.gpu(cancel, defer_to_ocr=True) if gpu_scheduler else nullcontext(True)) as acquired:
                 if not acquired:
                     break
                 segments, lang = translate_chunk(chunk, lang)

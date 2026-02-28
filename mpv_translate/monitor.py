@@ -56,7 +56,7 @@ class MPVMonitor:
         self._cancel.set()  # nothing running yet
         self._paused_by_seek = False  # True only when we paused MPV waiting for first subtitle
         self._ocr_seek_in_progress = False  # True while we manage OCR across a seek/load pause
-        self._overlay = OverlayManager(self.command, margin_bottom=self.config.subtitle.margin_bottom)
+        self._overlay = OverlayManager(self.command, margin_bottom=self.config.subtitle.margin_bottom, font_size=self.config.subtitle.font_size)
 
         # GPU scheduler: coordinates GPU access between audio and OCR pipelines.
         self._gpu_scheduler: Optional[GpuScheduler] = (
@@ -68,6 +68,7 @@ class MPVMonitor:
             self.command,
             margin_top=self.config.ocr.margin_top,
             max_lines=self.config.ocr.max_lines,
+            font_size=self.config.ocr.font_size,
         )
         self._ocr_loop: Optional[OcrLoop] = (
             OcrLoop(self.command, self.config, self._ocr_overlay,
@@ -188,6 +189,11 @@ class MPVMonitor:
                 self._paused_by_seek = False
                 self._ocr_seek_in_progress = False
 
+        # Give OCR first GPU access so on-screen text appears before audio
+        # translation starts its (expensive) first Whisper chunk.
+        if self._ocr_loop and self._gpu_scheduler:
+            self._gpu_scheduler.set_ocr_priority()
+
         cancel = None
         if self.enabled:
             cancel = self._launch(position=0.0, first_ready=first_ready)
@@ -283,11 +289,8 @@ class MPVMonitor:
         # or when max_wait is 0 (user opted out of pause-on-seek).
         max_wait = self.config.translate.max_wait
         first_ready: Optional[Event] = None
-        ocr_first_ready: Optional[Event] = None
         if max_wait > 0 and (not was_paused or self._paused_by_seek):
             first_ready = Event()
-            if self._ocr_loop:
-                ocr_first_ready = Event()
             if not was_paused:
                 # Set flag before pausing so _on_pause_change(True) doesn't stop OCR.
                 self._ocr_seek_in_progress = True
@@ -297,15 +300,14 @@ class MPVMonitor:
                 except MPVError:
                     log.warning("could not pause MPV after seek")
                     first_ready = None
-                    ocr_first_ready = None
                     self._paused_by_seek = False
                     self._ocr_seek_in_progress = False
 
-        # Restart the OCR loop at the new position immediately.  It uses capture_frame_av
-        # (file-based) so it works correctly even while MPV is paused.
-        if self._ocr_loop and ocr_first_ready is not None:
+        # Restart the OCR loop at the new position (no priority — just let it
+        # run in the background without gating playback resumption).
+        if self._ocr_loop:
             self._ocr_loop.stop()
-            self._ocr_loop.start(first_ready=ocr_first_ready)
+            self._ocr_loop.start()
 
         cancel = self._launch(
             position=position,
@@ -317,7 +319,7 @@ class MPVMonitor:
             max_wait = self.config.translate.max_wait
             threading.Thread(
                 target=self._wait_and_resume,
-                args=(first_ready, ocr_first_ready, cancel, max_wait),
+                args=(first_ready, None, cancel, max_wait),
                 daemon=True,
                 name="seek-waiter",
             ).start()
