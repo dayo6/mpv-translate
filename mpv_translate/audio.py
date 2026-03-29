@@ -6,9 +6,11 @@ import numpy as np
 
 
 def _safe_av_path(path):
-    """Prefix local paths with file: so ffmpeg won't parse @ # ? as URL syntax."""
-    if isinstance(path, str) and "://" not in path:
-        return "file:" + path.replace("\\", "/")
+    """Return a path safe for av.open / ffmpeg.
+
+    Local paths are kept as-is (backslashes on Windows prevent ffmpeg from
+    misinterpreting @ # ? as URL syntax).  URLs are returned unchanged.
+    """
     return path
 
 

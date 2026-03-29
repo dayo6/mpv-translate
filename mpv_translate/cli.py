@@ -72,10 +72,41 @@ def _save_executable(exe_path: str) -> None:
         config_path.write_text(new_text, encoding="utf8")
 
 
+def _discover_mpv_pipe(base: str = "mpvsocket", pid: Optional[int] = None) -> Optional[str]:
+    """Find an mpv IPC pipe on Windows.
+
+    If *pid* is given, return ``mpvsocket-<pid>`` directly.
+    Otherwise, scan ``\\\\.\\pipe\\`` for pipes matching ``mpvsocket-*``
+    and return the first one found (falls back to the bare *base* name).
+    """
+    import os  # noqa: PLC0415
+
+    if pid:
+        return f"{base}-{pid}"
+
+    # Enumerate Windows named pipes
+    pipe_dir = r"\\.\pipe"
+    try:
+        pipes = os.listdir(pipe_dir)
+    except OSError:
+        return base
+
+    # Prefer PID-specific pipes (created by playlist-manager.lua)
+    candidates = sorted(p for p in pipes if p.startswith(f"{base}-"))
+    if candidates:
+        return candidates[0]
+
+    # Fall back to the base name if it exists
+    if base in pipes:
+        return base
+    return None
+
+
 @click.command()
 @click.argument("path", required=False, default=None)
+@click.option("--pid", default=None, type=int, help="PID of the mpv instance to attach to")
 @click.option("--loglevel", default="INFO", show_default=True)
-def cli(path: Optional[str], loglevel: str):
+def cli(path: Optional[str], pid: Optional[int], loglevel: str):
     """
     mpv-translate: live offline translation overlay for MPV.
 
@@ -83,6 +114,7 @@ def cli(path: Optional[str], loglevel: str):
     mpv.conf / config.toml) and streams translated subtitles as you watch.
 
     Optionally pass a PATH to load that file into MPV on startup.
+    Use --pid to target a specific mpv instance.
     """
     logging.basicConfig(
         level=loglevel,
@@ -97,18 +129,35 @@ def cli(path: Optional[str], loglevel: str):
     _cfg = get_config()
     _resolve_executable(_cfg)
 
+    # Discover the right pipe for this mpv instance
+    log = logging.getLogger("cli")
+    base_socket = _cfg.mpv.ipc_socket or "mpvsocket"
+    discovered = _discover_mpv_pipe(base_socket, pid)
+    if discovered:
+        log.info("using IPC pipe: %s", discovered)
+        _cfg.mpv.ipc_socket = discovered
+    else:
+        log.warning("no mpv pipe found, using configured: %s", base_socket)
+
     # Pre-load the Whisper model so the first seek/play is fast
     get_model()
+
+    # Pre-load text translation model for audio subtitles
+    if _cfg.translate.translator in ("nllb", "opus") and _cfg.translate.language and _cfg.translate.language != _cfg.translate.target_lang:
+        if _cfg.translate.translator == "nllb":
+            from .nllb import warm_up as audio_translate_warm_up  # noqa: PLC0415
+        else:
+            from .ocr_translate import warm_up as audio_translate_warm_up  # noqa: PLC0415
+        audio_translate_warm_up(_cfg.translate.language, _cfg.translate.target_lang, gpu=True)
 
     # Pre-load OCR models so they are ready before the first file plays
     from .ocr import warm_up            # noqa: PLC0415
     if _cfg.ocr.enabled:
         warm_up(_cfg.ocr)
-        from .ocr_translate import warm_up as translate_warm_up  # noqa: PLC0415
-        translate_warm_up(_cfg.ocr.source_lang, _cfg.ocr.target_lang, gpu=_cfg.ocr.gpu)
+        from .ocr_translate import warm_up as ocr_translate_warm_up  # noqa: PLC0415
+        ocr_translate_warm_up(_cfg.ocr.source_lang, _cfg.ocr.target_lang, gpu=_cfg.ocr.gpu)
 
     # Retry connection — MPV's IPC pipe may not be ready yet.
-    log = logging.getLogger("cli")
     timeout, interval = 30.0, 0.5
     deadline = time.monotonic() + timeout
     while True:

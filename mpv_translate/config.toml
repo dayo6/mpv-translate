@@ -10,7 +10,7 @@ args = { device = "cuda", compute_type = "float16" }
 
 # Args passed to each transcribe/translate call
 # no_speech_threshold: lower = suppress more silence-only segments (default 0.6)
-task_args = { beam_size = 3, vad_filter = true, word_timestamps = true, no_speech_threshold = 0.35 }
+task_args = { beam_size = 3, vad_filter = true, word_timestamps = true, no_speech_threshold = 0.35, condition_on_previous_text = false, repetition_penalty = 1.5, no_repeat_ngram_size = 3, hallucination_silence_threshold = 2.0 }
 
 
 [translate]
@@ -93,6 +93,18 @@ max_lead = 0
 # If inference exceeds this, the result is discarded and the chunk is skipped.
 timeout = 0
 
+# Translation backend for audio subtitles.
+#   "nllb"    = Meta NLLB-200 3.3B — best quality, ~6.5 GB VRAM in float16 (recommended)
+#   "opus"    = Helsinki-NLP OPUS-MT — lighter (~300 MB), fast, decent quality
+#   "whisper" = Whisper's built-in translate task — fastest, lowest quality
+# Requires: pip install transformers sentencepiece (already needed for OCR).
+# The model is downloaded from Hugging Face on first use and cached locally.
+translator = "nllb"
+
+# Target language for text translation. Only used when translator is "nllb" or "opus".
+# Source language is taken from the `language` setting above.
+target_lang = "en"
+
 # Word-detection pre-filter: a small Whisper model checks if actual words are spoken
 # before running the expensive main model. Saves GPU time on silent/music-only chunks.
 # Set to "" to disable. Common choices: "tiny" (~75MB, fastest), "base" (~150MB, more accurate).
@@ -102,7 +114,7 @@ gate_model = "tiny"
 [mpv]
 # Path to mpv executable — leave commented out if mpv is on PATH or in a standard location
 # executable = "C:/Path/To/Executable/mpv.exe"
-executable = "C:/Users/danie/Downloads/mpv-x86_64-20251023-git-aa2dad0/mpv.exe"
+# executable = "C:/Path/To/mpv.exe"
 
 # Set to true to launch a new mpv instance on startup
 start_mpv = false

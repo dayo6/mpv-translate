@@ -282,6 +282,17 @@ def _run(
     return segs, lang
 
 
+def _seg_start(s: Any) -> float:
+    """Return the start of the first spoken word if word timestamps are available.
+
+    Whisper's segment .start can precede actual speech onset by up to ~0.5s.
+    When word_timestamps=True, words[0].start gives a tighter bound so the
+    subtitle doesn't appear before speech begins.
+    """
+    words = getattr(s, "words", None)
+    return words[0].start if words else s.start
+
+
 def _seg_end(s: Any, padding: float = 0.0) -> float:
     """Return the end of the last spoken word if word timestamps are available.
 
@@ -300,8 +311,9 @@ def _seg_end(s: Any, padding: float = 0.0) -> float:
 # so the hallucination is caught regardless of how Whisper finishes the sentence.
 _HALLUCINATION_RE = re.compile(
     r"^\s*(?:"
-    # YouTube-style calls to action
-    r"(?:thank(?:s| you)[,.]?\s*)*thank(?:s| you)(?: (?:so|very) much)? for (?:your )?(?:watching|viewing|listening)\b.*"
+    # YouTube-style calls to action / bare "thank you" hallucinations
+    r"(?:thank(?:s| you)(?: (?:so|very) much)?[,.]?\s*)+$"
+    r"|(?:thank(?:s| you)[,.]?\s*)*thank(?:s| you)(?: (?:so|very) much)? for (?:your )?(?:watching|viewing|listening)\b.*"
     r"|please (?:like|subscribe|share|comment)\b.*"
     r"|(?:like|subscribe)(?:,? and|,) (?:subscribe|like|share|comment|the channel)\b.*"
     r"|don'?t forget to (?:like|subscribe|share)\b.*"
@@ -328,6 +340,23 @@ _HALLUCINATION_RE = re.compile(
 )
 
 
+def _has_repetition(text: str, min_repeats: int = 3) -> bool:
+    """Return True if *text* is mostly the same phrase repeated.
+
+    Catches patterns like "Thank you. Thank you. Thank you." which Whisper
+    hallucinates during silence or music.  Splits on sentence-ending
+    punctuation and checks whether any single phrase accounts for most of
+    the sentences.
+    """
+    parts = [p.strip() for p in re.split(r'[.!?。！？]+', text) if p.strip()]
+    if len(parts) < min_repeats:
+        return False
+    from collections import Counter
+    counts = Counter(p.lower() for p in parts)
+    most_common_count = counts.most_common(1)[0][1]
+    return most_common_count >= min_repeats
+
+
 def _is_hallucination(text: str) -> bool:
     """Return True if *text* looks like a Whisper hallucination phrase.
 
@@ -338,7 +367,25 @@ def _is_hallucination(text: str) -> bool:
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     if not lines:
         return True
-    return bool(_HALLUCINATION_RE.match(lines[-1]))
+    last = lines[-1]
+    if _HALLUCINATION_RE.match(last):
+        return True
+    if _has_repetition(last):
+        return True
+    return False
+
+
+def _translate_texts(texts: list[str], source_lang: str, target_lang: str) -> list[str]:
+    """Translate a list of strings using the configured backend (nllb or opus)."""
+    config = get_config()
+    backend = config.translate.translator
+
+    if backend == "nllb":
+        from .nllb import translate_text  # noqa: PLC0415
+    else:
+        from .ocr_translate import translate_text  # noqa: PLC0415
+
+    return [translate_text(text, source_lang, target_lang) for text in texts]
 
 
 def translate_chunk(
@@ -355,11 +402,18 @@ def translate_chunk(
         "<original text>\\n<English translation>"  (when show_translation is also True)
         "<original text>"                          (when show_translation is False)
     Otherwise only the English translation is shown.
+
+    When translator is "nllb" or "opus", Whisper only transcribes (source
+    language) and the selected backend translates the text.
     """
     config = get_config()
     show_original = config.translate.show_original
     show_translation = config.translate.show_translation
     padding = config.translate.word_end_padding
+    backend = config.translate.translator
+    use_text_translator = backend in ("nllb", "opus")
+    src_lang = language or config.translate.language
+    tgt_lang = config.translate.target_lang
 
     if show_original:
         if not show_translation:
@@ -367,10 +421,29 @@ def translate_chunk(
             orig_segs, lang = _run(audio, "transcribe", language)
             if not orig_segs:
                 return [], lang
-            return [Segment(s.start, _seg_end(s, padding), s.text.strip()) for s in orig_segs], lang
+            return [Segment(_seg_start(s), _seg_end(s, padding), s.text.strip()) for s in orig_segs], lang
 
-        # Run transcribe and translate concurrently — both tasks are
-        # independent and ctranslate2 is thread-safe for inference.
+        if use_text_translator and src_lang and src_lang != tgt_lang:
+            # Transcribe only, then translate text via NLLB/OPUS-MT
+            orig_segs, lang = _run(audio, "transcribe", language)
+            if not orig_segs:
+                return [], lang
+
+            orig_texts = [s.text.strip() for s in orig_segs]
+            translations = _translate_texts(orig_texts, src_lang, tgt_lang)
+
+            merged: list[Segment] = []
+            for s, translation in zip(orig_segs, translations):
+                text = s.text.strip()
+                if translation and translation.lower() != text.lower():
+                    text = f"{text}\n{translation}"
+                merged.append(Segment(_seg_start(s), _seg_end(s, padding), text))
+
+            if config.translate.suppress_hallucinations:
+                merged = [s for s in merged if not _is_hallucination(s.text)]
+            return merged, lang
+
+        # Fallback: run transcribe and translate concurrently via Whisper
         fut_orig = _whisper_pool.submit(_run, audio, "transcribe", language)
         fut_trans = _whisper_pool.submit(_run, audio, "translate", language)
         orig_segs, lang = fut_orig.result()
@@ -379,26 +452,43 @@ def translate_chunk(
         if not orig_segs:
             return [], lang
 
-        merged: list[Segment] = []
+        merged = []
         for o, t in zip(orig_segs, trans_segs):
             text = o.text.strip()
             translation = t.text.strip()
             if translation and translation.lower() != text.lower():
                 text = f"{text}\n{translation}"
-            merged.append(Segment(o.start, _seg_end(o, padding), text))
+            merged.append(Segment(_seg_start(o), _seg_end(o, padding), text))
 
         for seg in orig_segs[len(trans_segs):]:
-            merged.append(Segment(seg.start, _seg_end(seg, padding), seg.text.strip()))
+            merged.append(Segment(_seg_start(seg), _seg_end(seg, padding), seg.text.strip()))
         for seg in trans_segs[len(orig_segs):]:
-            merged.append(Segment(seg.start, _seg_end(seg, padding), seg.text.strip()))
+            merged.append(Segment(_seg_start(seg), _seg_end(seg, padding), seg.text.strip()))
 
         if config.translate.suppress_hallucinations:
             merged = [s for s in merged if not _is_hallucination(s.text)]
         return merged, lang
 
     else:
-        trans_segs, lang = _run(audio, "translate", language)
-        segs = [Segment(s.start, _seg_end(s, padding), s.text.strip()) for s in trans_segs]
+        if use_text_translator and src_lang and src_lang != tgt_lang:
+            # Transcribe then translate via NLLB/OPUS-MT
+            orig_segs, lang = _run(audio, "transcribe", language)
+            if not orig_segs:
+                return [], lang
+
+            orig_texts = [s.text.strip() for s in orig_segs]
+            translations = _translate_texts(orig_texts, src_lang, tgt_lang)
+
+            segs = [
+                Segment(_seg_start(s), _seg_end(s, padding), t)
+                for s, t in zip(orig_segs, translations)
+                if t.strip()
+            ]
+        else:
+            # Whisper's built-in translate task
+            trans_segs, lang = _run(audio, "translate", language)
+            segs = [Segment(_seg_start(s), _seg_end(s, padding), s.text.strip()) for s in trans_segs]
+
         if config.translate.suppress_hallucinations:
             segs = [s for s in segs if not _is_hallucination(s.text)]
         return segs, lang

@@ -74,6 +74,15 @@ class TranslateConfig:
     # Maximum seconds to wait for a Whisper transcribe/translate call to finish (0 = unlimited).
     # If inference exceeds this, the result is discarded and the chunk is skipped.
     timeout: float = 0
+    # Translation backend for audio subtitles.
+    # "nllb"    = Meta NLLB-200 3.3B — best quality, ~6.5 GB VRAM (recommended)
+    # "opus"    = Helsinki-NLP OPUS-MT — lighter, fast, decent quality
+    # "whisper" = Whisper's built-in translate task — fastest, lowest quality
+    translator: str = "nllb"
+    # Target language for text translation (e.g. "en").
+    # Only used when translator is "nllb" or "opus".
+    # Source language is taken from `language` above.
+    target_lang: str = "en"
 
 
 @dataclass(kw_only=True)

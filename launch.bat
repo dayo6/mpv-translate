@@ -148,16 +148,17 @@ echo Using MPV: !MPV!
 
 :: ── start MPV with IPC socket ─────────────────────────────────────────────────
 :: %1 = optional video file (drag a file onto this .bat to open it directly)
+:: playlist-manager.lua will override the pipe to mpvsocket-<PID> on startup
 if "%~1"=="" (
     start "" "!MPV!" --input-ipc-server=%SOCKET%
 ) else (
     start "" "!MPV!" --input-ipc-server=%SOCKET% "%~1"
 )
 
-:: Wait for MPV to open the named pipe
-timeout /t 2 /nobreak >nul
+:: Wait for MPV to start and playlist-manager.lua to set up PID-specific pipe
+timeout /t 3 /nobreak >nul
 
-:: ── start mpv-translate ───────────────────────────────────────────────────────
+:: ── start mpv-translate (auto-discovers the PID-specific pipe) ──────────────
 "%VENV_BIN%\mpv-translate.exe" --loglevel DEBUG
 
 endlocal

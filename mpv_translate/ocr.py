@@ -60,8 +60,7 @@ def capture_frame_av(video_path: str, timestamp: float, output_path: str) -> boo
         # Suppress noisy h264 NAL-unit errors that flood the log on seek.
         _av.logging.set_level(_av.logging.FATAL)
         try:
-            safe_path = video_path if "://" in video_path else "file:" + video_path.replace("\\", "/")
-            with _av.open(safe_path) as container:
+            with _av.open(video_path) as container:
                 stream = next((s for s in container.streams if s.type == "video"), None)
                 if stream is None:
                     return False

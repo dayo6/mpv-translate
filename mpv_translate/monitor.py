@@ -33,6 +33,23 @@ from .translate import cleanup as _cleanup_models, get_model
 
 log = logging.getLogger("monitor")
 
+_VIDEO_EXTS = frozenset((
+    ".mp4", ".mkv", ".avi", ".wmv", ".ts", ".flv", ".webm", ".m4v", ".mov",
+    ".mpg", ".mpeg", ".vob", ".ogv", ".rm", ".rmvb", ".asf", ".3gp",
+))
+
+
+def _resolve_video_in_dir(path: str) -> str:
+    """If *path* is a local directory, return the first video file inside it."""
+    if "://" in path:
+        return path
+    import os  # noqa: PLC0415
+    if os.path.isdir(path):
+        for entry in os.listdir(path):
+            if os.path.splitext(entry)[1].lower() in _VIDEO_EXTS:
+                return os.path.join(path, entry)
+    return path
+
 
 def _unstructure(arg: Any) -> Any:
     if isinstance(arg, pathlib.Path):
@@ -130,11 +147,31 @@ class MPVMonitor:
         if self._ocr_loop:
             self.mpv.bind_property_observer("pause", self._on_pause_change)
 
+    def _resolve_path(self) -> Optional[str]:
+        """Return the media path MPV is playing.
+
+        Prefers the raw ``path`` property (local filesystem) because PyAV's
+        ffmpeg may lack support for protocols like sftp:// that on_load hooks
+        rewrite to.  Falls back to ``stream-open-filename`` for network
+        streams where ``path`` is already a URL.
+
+        If the resolved path is a local directory (common on NAS shares where
+        the folder name matches the title), the first video file inside it is
+        returned instead.
+        """
+        for prop in ("path", "stream-open-filename"):
+            try:
+                val = self.command("get_property", prop)
+                if val:
+                    return _resolve_video_in_dir(val)
+            except MPVError:
+                pass
+        return None
+
     def _launch_if_already_playing(self):
         """If MPV already has a file loaded when we connect, start translating it."""
-        try:
-            path = self.command("get_property", "path")
-        except MPVError:
+        path = self._resolve_path()
+        if not path:
             return
         if not path:
             return
@@ -438,11 +475,7 @@ class MPVMonitor:
         if not self.enabled:
             return None
 
-        path: Optional[str] = None
-        try:
-            path = self.command("get_property", "path")
-        except MPVError:
-            pass
+        path = self._resolve_path()
         if not path:
             return None
 

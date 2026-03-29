@@ -182,6 +182,18 @@ class OcrLoop:
         # Last detected bboxes for region-aware frame diff.
         self._last_regions: list[tuple[int, int, int, int]] = []
 
+    def _resolve_path(self) -> str:
+        """Return the media path MPV is playing (prefers local filesystem path)."""
+        from .monitor import _resolve_video_in_dir  # noqa: PLC0415
+        for prop in ("path", "stream-open-filename"):
+            try:
+                val = self._cmd("get_property", prop)
+                if val:
+                    return _resolve_video_in_dir(str(val))
+            except Exception:
+                pass
+        return ""
+
     # ── public API ───────────────────────────────────────────────────────────
 
     def start(self, first_ready: Optional[Event] = None):
@@ -280,7 +292,7 @@ class OcrLoop:
         from .ocr import capture_frame_av, extract_blocks  # noqa: PLC0415
 
         try:
-            path = str(self._cmd("get_property", "path") or "")
+            path = self._resolve_path()
             duration = float(self._cmd("get_property", "duration") or 0)
         except Exception:
             return
@@ -789,7 +801,7 @@ class OcrLoop:
                 frontier = self._gpu.audio_frontier
                 if frontier > scan_pos:
                     try:
-                        path = str(self._cmd("get_property", "path") or "")
+                        path = self._resolve_path()
                     except Exception:
                         path = ""
 
@@ -837,7 +849,7 @@ class OcrLoop:
             # ── Phase C: Proactive scan ahead of playback ─────────────────
             try:
                 pos = float(self._cmd("get_property", "time-pos") or 0.0)
-                path = str(self._cmd("get_property", "path") or "")
+                path = self._resolve_path()
                 duration = float(self._cmd("get_property", "duration") or 0.0)
             except Exception:
                 if self._stop.wait(1.0):
@@ -935,7 +947,7 @@ class OcrLoop:
             # 1. Current position and path.
             try:
                 pos = float(self._cmd("get_property", "time-pos") or 0.0)
-                path = str(self._cmd("get_property", "path") or "")
+                path = self._resolve_path()
             except Exception:
                 continue
             if not path:
@@ -1108,7 +1120,7 @@ class OcrLoop:
         # a Bayesian-tuned offset that shrinks near expected transitions.
         try:
             pos = float(self._cmd("get_property", "time-pos") or 0.0)
-            path = str(self._cmd("get_property", "path") or "")
+            path = self._resolve_path()
         except Exception:
             pos, path = 0.0, ""
         target = pos + offset
