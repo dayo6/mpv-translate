@@ -145,7 +145,9 @@ def _translate_batch(
             **inputs,
             forced_bos_token_id=tgt_token_id,
             num_beams=4,
-            max_new_tokens=max(20, max_src * 3),
-            repetition_penalty=1.5,
+            max_new_tokens=max(40, max_src * 4),
+            repetition_penalty=2.0,
+            no_repeat_ngram_size=3,
+            length_penalty=1.0,
         )
     return tokenizer.batch_decode(generated, skip_special_tokens=True)

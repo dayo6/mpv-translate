@@ -99,7 +99,7 @@ timeout = 0
 #   "whisper" = Whisper's built-in translate task — fastest, lowest quality
 # Requires: pip install transformers sentencepiece (already needed for OCR).
 # The model is downloaded from Hugging Face on first use and cached locally.
-translator = "nllb"
+translator = "opus"
 
 # Target language for text translation. Only used when translator is "nllb" or "opus".
 # Source language is taken from the `language` setting above.
@@ -114,7 +114,7 @@ gate_model = "tiny"
 [mpv]
 # Path to mpv executable — leave commented out if mpv is on PATH or in a standard location
 # executable = "C:/Path/To/Executable/mpv.exe"
-# executable = "C:/Path/To/mpv.exe"
+executable = "C:/Users/danie/Downloads/mpv-x86_64-20251023-git-aa2dad0/mpv.exe"
 
 # Set to true to launch a new mpv instance on startup
 start_mpv = false
@@ -215,7 +215,8 @@ source_lang = "ja"
 target_lang = "en"
 
 # Use GPU for easyocr inference.
-gpu = true
+# Note: set to false if easyocr crashes with cuDNN errors (Whisper+NLLB already use GPU).
+gpu = false
 
 # After showing the same OCR text for this many seconds, hide the overlay.
 # 0.0 = keep showing indefinitely.  15.0 works well for most title cards.

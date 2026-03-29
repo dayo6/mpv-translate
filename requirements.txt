@@ -8,3 +8,14 @@ python-mpv-jsonipc
 cattrs
 attrs
 toml
+
+# Translation (NLLB / OPUS-MT) & OCR
+transformers
+sentencepiece
+easyocr
+Pillow
+
+# GPU: install CUDA torch LAST (easyocr pulls in CPU torch, this overwrites it)
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# For CPU-only, just: pip install torch
+torch

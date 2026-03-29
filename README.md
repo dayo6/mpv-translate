@@ -6,13 +6,15 @@ Live offline subtitle translation overlay for [MPV](https://mpv.io/) using [fast
 
 ## Features
 
-- **Offline translation** — Whisper's `translate` task converts speech directly to English on your GPU or CPU
+- **Offline translation** — Whisper transcribes speech, OPUS-MT or NLLB translates to English on your GPU or CPU
 - **Bilingual subtitles** — show original text above the English translation (`show_original = true`)
+- **Pluggable translation backends** — OPUS-MT (recommended), NLLB-200 3.3B, or Whisper's built-in translate
 - **Flicker-free overlay** — uses MPV's `osd-overlay` API with 20 Hz polling; subtitles update smoothly
 - **Seek-aware** — cancels the current job and restarts from the new position with look-back
 - **Adaptive chunk sizing** — targets ~2 sentences per Whisper call, balancing latency and context
 - **Word-detection gate** — a tiny Whisper model skips silent/music-only chunks before running the main model
-- **Hallucination suppression** — filters common Whisper phantom phrases ("Thanks for watching!", etc.)
+- **Hallucination suppression** — native Whisper anti-hallucination params + regex filtering of phantom phrases
+- **Word-level timing** — uses word timestamps for precise subtitle start/end (no early appearance)
 - **OCR translation** (optional) — detects on-screen text with EasyOCR and translates it with OPUS-MT
 - **GPU scheduling** — audio translation and OCR share a single GPU without collisions
 
@@ -37,15 +39,28 @@ chmod +x launch.sh
 
 You can also drag a video file onto `launch.bat` to open it directly.
 
-For OCR support, activate the venv and install the extra:
+### Full install (GPU translation + OCR)
+
+After the initial setup, install the GPU and translation dependencies:
 
 ```bash
-# Windows
-.venv\Scripts\activate && pip install -e ".[ocr]"
+# Activate the venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
 
-# Linux / macOS
-source .venv/bin/activate && pip install -e ".[ocr]"
+# Install translation and OCR deps
+pip install transformers sentencepiece easyocr Pillow
+
+# Install CUDA PyTorch LAST (easyocr pulls in CPU torch, this overwrites it)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# For CPU-only:
+# pip install torch torchvision
 ```
+
+> **Important:** Install CUDA torch *after* easyocr, otherwise easyocr's CPU torch dependency will overwrite it.
 
 ### MPV configuration
 
@@ -126,13 +141,15 @@ Settings are loaded in order (later files override earlier ones):
 |-----|---------|-------------|
 | `model` | `"large-v3"` | Whisper model name |
 | `args` | `{ device = "cuda", compute_type = "float16" }` | `WhisperModel()` init args |
-| `task_args` | `{ beam_size = 3, vad_filter = true, ... }` | Per-call transcribe/translate args |
+| `task_args` | `{ beam_size = 3, vad_filter = true, ... }` | Per-call transcribe/translate args (includes anti-hallucination params) |
 
 ### `[translate]` — Translation engine
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `language` | `"ja"` | Source language code (or `""` for auto-detect) |
+| `translator` | `"opus"` | Translation backend: `"opus"` (OPUS-MT), `"nllb"` (NLLB-200 3.3B), or `"whisper"` |
+| `target_lang` | `"en"` | Target language for OPUS-MT/NLLB translation |
 | `show_original` | `false` | Show original text above translation |
 | `show_translation` | `true` | Show English translation |
 | `lookback_seconds` | `3.0` | Seconds to rewind after seek to catch sentence starts |
@@ -176,7 +193,7 @@ Settings are loaded in order (later files override earlier ones):
 | `language` | `["ja"]` | EasyOCR language codes |
 | `source_lang` | `"ja"` | OPUS-MT source language |
 | `target_lang` | `"en"` | OPUS-MT target language |
-| `gpu` | `true` | Use GPU for EasyOCR |
+| `gpu` | `false` | Use GPU for EasyOCR |
 | `min_confidence` | `0.5` | Minimum OCR confidence |
 | `min_length` | `2` | Skip text blocks shorter than this |
 | `max_chars` | `120` | Skip text blocks longer than this |
@@ -188,6 +205,16 @@ Settings are loaded in order (later files override earlier ones):
 | `min_display_seconds` | `3.0` | Minimum visibility before auto-hide |
 | `watermark_frames` | `10` | Suppress text persistent for this many frames |
 | `cooldown_seconds` | `30.0` | Suppress duplicate text within this window |
+
+## Translation backends
+
+| Backend | Quality (ja→en) | Speed | VRAM | Notes |
+|---------|----------------|-------|------|-------|
+| `"opus"` | Best for common pairs | Fast | ~300 MB | Helsinki-NLP OPUS-MT, purpose-built per language pair |
+| `"nllb"` | Broader coverage | Slower | ~6.5 GB | Meta NLLB-200 3.3B, 200 languages, may repeat on some pairs |
+| `"whisper"` | Lowest | Fastest | 0 (shared) | Whisper's built-in translate task, no extra model |
+
+**Recommendation:** Use `"opus"` for well-supported language pairs (ja, zh, ko, de, fr, es, etc.). Use `"nllb"` only for rare pairs not covered by OPUS-MT.
 
 ## Supported languages
 
@@ -208,9 +235,11 @@ Set `language = ""` in config to auto-detect.
 1. **MPV monitor** listens for file-load and seek events over the IPC socket
 2. **Audio reader** (PyAV) extracts 16 kHz mono float32 audio in chunks
 3. **Word-detection gate** runs a tiny Whisper model to skip silent chunks
-4. **Whisper translate** converts speech to English (or runs bilingual transcribe + translate concurrently)
-5. **Overlay manager** displays subtitles via `osd-overlay`, updating at 20 Hz with no flicker
-6. **OCR loop** (optional) captures frames ahead of playback, detects text with EasyOCR, and translates with OPUS-MT
+4. **Whisper transcribe** converts speech to source-language text (with word-level timestamps)
+5. **Translation** — OPUS-MT or NLLB translates the transcribed text to English
+6. **Hallucination filter** — regex + repetition detection removes phantom phrases
+7. **Overlay manager** displays subtitles via `osd-overlay`, updating at 20 Hz with no flicker
+8. **OCR loop** (optional) captures frames ahead of playback, detects text with EasyOCR, and translates with OPUS-MT
 
 ## License
 

@@ -161,4 +161,5 @@ timeout /t 3 /nobreak >nul
 :: ── start mpv-translate (auto-discovers the PID-specific pipe) ──────────────
 "%VENV_BIN%\mpv-translate.exe" --loglevel DEBUG
 
+pause
 endlocal
